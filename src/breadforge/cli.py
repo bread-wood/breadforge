@@ -65,8 +65,121 @@ _REQUIRED_LABELS = [
 ]
 
 
+def _init_empty_repo(repo: str) -> None:
+    """Create an initial empty commit on repos with no commits (no default branch)."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="breadforge-init-") as tmpdir:
+        tmppath = Path(tmpdir)
+        subprocess.run(
+            ["gh", "repo", "clone", repo, "."],
+            cwd=tmppath,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(["git", "checkout", "-b", "main"], cwd=tmppath, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "chore: initialize repository"],
+            cwd=tmppath,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "push", "-u", "origin", "main"],
+            cwd=tmppath,
+            capture_output=True,
+            text=True,
+        )
+
+
+def _ensure_ci_auth(repo: str) -> None:
+    """Patch ci.yml to authenticate sibling repo clones with GITHUB_TOKEN. Idempotent."""
+    import base64
+
+    r = subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/.github/workflows/ci.yml"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return  # no ci.yml — nothing to patch
+    try:
+        data = json.loads(r.stdout)
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        sha = data["sha"]
+    except (json.JSONDecodeError, KeyError, Exception):
+        return
+
+    # Already patched or no unauthenticated sibling clones
+    if "x-access-token:${GH_TOKEN}@github.com" in content:
+        return
+    if "git clone https://github.com/" not in content:
+        return
+
+    # Patch: wrap git clone steps with GH_TOKEN env and use token URL
+    import re
+
+    def _patch_clone_step(m: re.Match) -> str:
+        block = m.group(0)
+        # Already has GH_TOKEN env
+        if "GH_TOKEN" in block:
+            return block
+        # Add env block and rewrite URLs
+        block = block.replace(
+            "git clone https://github.com/",
+            "git clone https://x-access-token:${GH_TOKEN}@github.com/",
+        )
+        # Insert env: block before `run:` in this step
+        block = re.sub(
+            r"(\s+run:\s*\|)",
+            r"\n        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\1",
+            block,
+            count=1,
+        )
+        return block
+
+    patched = re.sub(
+        r"- name: Clone sibling deps\n(?:[ \t]+.*\n)*?(?=[ \t]*-[ \t]|\Z)",
+        _patch_clone_step,
+        content,
+        flags=re.MULTILINE,
+    )
+
+    if patched == content:
+        return  # regex didn't match anything — leave it alone
+
+    encoded = base64.b64encode(patched.encode("utf-8")).decode("ascii")
+    subprocess.run(
+        [
+            "gh", "api", f"repos/{repo}/contents/.github/workflows/ci.yml",
+            "-X", "PUT",
+            "-f", "message=fix(ci): authenticate sibling dep clones with GITHUB_TOKEN",
+            "-f", f"content={encoded}",
+            "-f", f"sha={sha}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
 def _scaffold_repo(repo: str) -> None:
-    """Ensure all required labels exist on the repo. Idempotent."""
+    """Ensure all required labels exist on the repo and the repo has at least one commit. Idempotent."""
+    # Initialize empty repos before creating labels (labels fail on empty repos too)
+    r = subprocess.run(
+        ["gh", "repo", "view", repo, "--json", "isEmpty,defaultBranchRef"],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        info = json.loads(r.stdout)
+        if info.get("isEmpty") or not info.get("defaultBranchRef", {}).get("name"):
+            _init_empty_repo(repo)
+    except (json.JSONDecodeError, KeyError):
+        pass
+
+    # Patch CI workflow if needed
+    _ensure_ci_auth(repo)
+
     # Get existing labels
     r = subprocess.run(
         ["gh", "label", "list", "--repo", repo, "--json", "name", "--limit", "100"],
@@ -256,6 +369,7 @@ def run(
     logger = _get_logger(config)
 
     all_issue_numbers: list[int] = []
+    _spec_paths: list[tuple[Path, str, int | None]] = []  # (spec_path, milestone, issue_number)
 
     for spec_path in specs:
         if not spec_path.exists():
@@ -276,56 +390,93 @@ def run(
                         sub_path, repo, config, store, logger, milestone, dry_run
                     )
                     all_issue_numbers.extend(issue_numbers)
+                    ms = milestone or parse_spec(sub_path).version
+                    _spec_paths.append((sub_path, ms, issue_numbers[0] if issue_numbers else None))
         else:
             issue_numbers = _run_single_spec(
                 spec_path, repo, config, store, logger, milestone, dry_run
             )
             all_issue_numbers.extend(issue_numbers)
+            ms = milestone or parse_spec(spec_path).version
+            _spec_paths.append((spec_path, ms, issue_numbers[0] if issue_numbers else None))
 
-    if not all_issue_numbers:
+    if not all_issue_numbers and not _spec_paths:
         console.print("No issues to dispatch.")
         return
 
     console.print(
-        f"\nDispatching {len(all_issue_numbers)} issue(s) with concurrency={config.concurrency}..."
+        f"\nDispatching {len(_spec_paths)} spec(s) via graph executor "
+        f"(concurrency={config.concurrency})..."
     )
 
     if dry_run:
         console.print("[yellow][dry-run][/yellow] would dispatch:", all_issue_numbers)
         return
 
-    from breadforge.dispatch import RollingDispatcher
-    from breadforge.merge import process_merge_queue
+    from breadforge.graph.builder import build_greenfield_graph
+    from breadforge.graph.executor import GraphExecutor, make_handlers
 
-    dispatcher = RollingDispatcher(config, store, logger)
+    # Build an initial graph: one plan node per spec
+    # (all_issue_numbers is legacy; for the graph path we use spec files directly)
+    # For backward compat: if we have spec paths, use graph; otherwise fall back.
+    if _spec_paths:
+        handlers = make_handlers(store=store, logger=logger)
+        executor = GraphExecutor(
+            config=config,
+            handlers=handlers,
+            store=store,
+            logger=logger,
+            concurrency=config.concurrency,
+            watchdog_interval=float(config.watchdog_interval_seconds),
+        )
 
-    async def _run() -> None:
-        dispatch_task = asyncio.create_task(dispatcher.run(all_issue_numbers))
-
-        heartbeat_interval = config.watchdog_interval_seconds
-
-        async def _heartbeat() -> None:
-            while not dispatch_task.done():
-                await asyncio.sleep(heartbeat_interval)
-                queue = store.read_merge_queue()
-                logger.heartbeat(
-                    active_agents=dispatcher.active_count,
-                    queue_depth=len(queue.items),
-                    completed=dispatcher.completed_count,
-                    cost_usd=0.0,  # TODO: wire breadmin-llm cost tracking
+        async def _run_graph() -> None:
+            for spec_path, ms, milestone_issue in _spec_paths:
+                graph = build_greenfield_graph(
+                    milestone=ms,
+                    spec_file=spec_path,
+                    repo=config.repo,
+                    milestone_issue_number=milestone_issue,
                 )
-                # Drain merge queue
-                merged = process_merge_queue(store, config, logger=logger)
-                if merged:
-                    console.print(f"  merged {merged} PR(s)")
+                console.print(f"  executing graph for {ms}...")
+                result = await executor.run(graph)
+                console.print(
+                    f"  {ms}: done={len(result.done)} failed={len(result.failed)} "
+                    f"abandoned={len(result.abandoned)}"
+                )
 
-        await asyncio.gather(dispatch_task, _heartbeat())
+        asyncio.run(_run_graph())
+    else:
+        # Legacy: rolling dispatcher for issue-number-only runs
+        from breadforge.dispatch import RollingDispatcher
+        from breadforge.merge import process_merge_queue
 
-        # Final merge drain
-        process_merge_queue(store, config, logger=logger)
+        dispatcher = RollingDispatcher(config, store, logger)
 
-    asyncio.run(_run())
-    console.print(f"\n[green]Done.[/green] Completed: {dispatcher.completed_count}")
+        async def _run() -> None:
+            dispatch_task = asyncio.create_task(dispatcher.run(all_issue_numbers))
+
+            heartbeat_interval = config.watchdog_interval_seconds
+
+            async def _heartbeat() -> None:
+                while not dispatch_task.done():
+                    await asyncio.sleep(heartbeat_interval)
+                    queue = store.read_merge_queue()
+                    logger.heartbeat(
+                        active_agents=dispatcher.active_count,
+                        queue_depth=len(queue.items),
+                        completed=dispatcher.completed_count,
+                        cost_usd=0.0,
+                    )
+                    merged = process_merge_queue(store, config, logger=logger)
+                    if merged:
+                        console.print(f"  merged {merged} PR(s)")
+
+            await asyncio.gather(dispatch_task, _heartbeat())
+            process_merge_queue(store, config, logger=logger)
+
+        asyncio.run(_run())
+        console.print(f"\n[green]Done.[/green] Completed: {dispatcher.completed_count}")
 
 
 def _run_single_spec(
@@ -467,9 +618,13 @@ def _build_status_table(
     store: BeadStore,
     repo: str,
     milestone: str | None,
-) -> Table:
+) -> "Group":
+    from rich.console import Group
+
+    tables = []
+
     beads = store.list_work_beads(milestone=milestone)
-    state_colors = {
+    bead_colors = {
         "open": "dim",
         "claimed": "yellow",
         "pr_open": "blue",
@@ -477,19 +632,18 @@ def _build_status_table(
         "closed": "green",
         "abandoned": "red",
     }
-    table = Table(
+    bead_table = Table(
         title=f"Work Beads — {repo}" + (f" / {milestone}" if milestone else ""),
-        expand=True,
-    )
-    table.add_column("Issue", style="cyan", justify="right")
-    table.add_column("Title")
-    table.add_column("State")
-    table.add_column("Retries", justify="right")
-    table.add_column("Branch")
-    table.add_column("PR", justify="right")
+        )
+    bead_table.add_column("Issue", style="cyan", justify="right")
+    bead_table.add_column("Title")
+    bead_table.add_column("State")
+    bead_table.add_column("Retries", justify="right")
+    bead_table.add_column("Branch")
+    bead_table.add_column("PR", justify="right")
     for bead in sorted(beads, key=lambda b: b.issue_number):
-        color = state_colors.get(bead.state, "white")
-        table.add_row(
+        color = bead_colors.get(bead.state, "white")
+        bead_table.add_row(
             str(bead.issue_number),
             bead.title[:50],
             f"[{color}]{bead.state}[/{color}]",
@@ -497,7 +651,33 @@ def _build_status_table(
             bead.branch or "",
             str(bead.pr_number) if bead.pr_number else "",
         )
-    return table
+    tables.append(bead_table)
+
+    nodes = store.list_nodes()
+    if nodes:
+        node_colors = {
+            "pending": "dim",
+            "running": "yellow",
+            "done": "green",
+            "failed": "red",
+            "abandoned": "red",
+        }
+        node_table = Table(title="Graph Nodes")
+        node_table.add_column("Node ID")
+        node_table.add_column("Type")
+        node_table.add_column("State")
+        node_table.add_column("Retries", justify="right")
+        for node in sorted(nodes, key=lambda n: n.id):
+            color = node_colors.get(node.state, "white")
+            node_table.add_row(
+                node.id,
+                node.type,
+                f"[{color}]{node.state}[/{color}]",
+                str(node.retry_count) if node.retry_count else "",
+            )
+        tables.append(node_table)
+
+    return Group(*tables)
 
 
 @app.command()
@@ -522,8 +702,10 @@ def status(
                 time.sleep(3)
         return
 
-    if not store.list_work_beads(milestone=milestone):
-        console.print("No work beads found.")
+    beads = store.list_work_beads(milestone=milestone)
+    nodes = store.list_nodes()
+    if not beads and not nodes:
+        console.print("No beads or graph nodes found.")
         return
 
     # Campaign summary
@@ -542,7 +724,7 @@ def status(
 
     console.print(_build_status_table(store, repo, milestone))
 
-    # Active agents (slots in dispatch)
+    # Merge queue
     queue = store.read_merge_queue()
     if queue.items:
         console.print(f"\nMerge queue: {len(queue.items)} item(s)")
