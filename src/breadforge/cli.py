@@ -430,12 +430,25 @@ def run(
             watchdog_interval=float(config.watchdog_interval_seconds),
         )
 
+        # Clone the repo once for codebase assessment by the plan handler
+        import tempfile
+        repo_clone_dir = tempfile.mkdtemp(prefix="breadforge-clone-")
+        clone_result = subprocess.run(
+            ["gh", "repo", "clone", config.repo, repo_clone_dir, "--", "--depth=1"],
+            capture_output=True,
+            text=True,
+        )
+        repo_local_path = repo_clone_dir if clone_result.returncode == 0 else ""
+        if not repo_local_path:
+            console.print(f"[yellow]warning:[/yellow] could not clone {config.repo} for codebase assessment")
+
         async def _run_graph() -> None:
             for spec_path, ms, milestone_issue in _spec_paths:
                 graph = build_greenfield_graph(
                     milestone=ms,
                     spec_file=spec_path,
                     repo=config.repo,
+                    repo_local_path=repo_local_path,
                     milestone_issue_number=milestone_issue,
                 )
                 console.print(f"  executing graph for {ms}...")
