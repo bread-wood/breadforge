@@ -92,12 +92,15 @@ async def run_agent(
 
     env = _build_env(model)
 
+    # limit=8MB — claude --print can emit large JSON lines (tool outputs, file reads)
+    _8MB = 8 * 1024 * 1024
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=env,
+        limit=_8MB,
     )
 
     stdout_chunks: list[str] = []
