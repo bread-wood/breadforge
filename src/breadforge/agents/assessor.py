@@ -187,11 +187,19 @@ def assess_from_plan_artifact(
             overridden=True,
         )
 
-    high_risk = {"novel-domain", "security", "multi-module-coordination"}
-    if high_risk & set(artifact.risk_flags):
-        return AllocationResult(model=OPUS, tier=ComplexityTier.HIGH, upgraded=True)
-    if artifact.confidence < 0.7:
-        return AllocationResult(model=OPUS, tier=ComplexityTier.HIGH, upgraded=True)
+    # Low-risk module heuristic: infra/scaffold/docs modules don't need opus
+    # even when the artifact has global risk flags.
+    _LOW_RISK_KEYWORDS = {"infra", "scaffold", "docs", "readme", "ci", "config"}
+    module_lower = module.lower().lstrip("mod:").strip()
+    is_low_risk_module = any(k in module_lower for k in _LOW_RISK_KEYWORDS)
+
+    if not is_low_risk_module:
+        high_risk = {"novel-domain", "security", "multi-module-coordination"}
+        if high_risk & set(artifact.risk_flags):
+            return AllocationResult(model=OPUS, tier=ComplexityTier.HIGH, upgraded=True)
+        if artifact.confidence < 0.7:
+            return AllocationResult(model=OPUS, tier=ComplexityTier.HIGH, upgraded=True)
+
     return AllocationResult(model=SONNET, tier=ComplexityTier.MEDIUM)
 
 
