@@ -243,18 +243,6 @@ def _slug(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "-", s).strip("-")
 
 
-def _comment_on_issue(repo: str, issue_number: int | None, body: str) -> None:
-    """Post a progress comment on the milestone issue. No-op if no issue number."""
-    if not issue_number:
-        return
-    import subprocess
-
-    subprocess.run(
-        ["gh", "issue", "comment", str(issue_number), "--repo", repo, "--body", body],
-        capture_output=True,
-        text=True,
-    )
-
 
 def _file_module_issue(
     repo: str, module: str, milestone_slug: str, artifact: PlanArtifact
@@ -263,11 +251,26 @@ def _file_module_issue(
     import subprocess
 
     files = artifact.files_per_module.get(module, [])
+
+    # List other modules so the agent knows what is out of scope for this PR
+    other_modules = [m for m in artifact.modules if m != module]
+    other_scope_note = ""
+    if other_modules:
+        other_scope_note = (
+            "\n\n**Other modules in this milestone (out of scope for this PR):** "
+            + ", ".join(f"`{m}`" for m in other_modules)
+            + "\n\nDo NOT implement work belonging to those modules even if the approach "
+            "description mentions it. Each module is a separate PR."
+        )
+
+    module_approach = artifact.module_approaches.get(module) or artifact.approach
     body = (
         f"**Milestone:** {milestone_slug}\n"
         f"**Module:** `{module}`\n\n"
-        f"**Approach:** {artifact.approach}\n\n"
-        f"**Files to create/modify:**\n" + "\n".join(f"- `{f}`" for f in files)
+        f"**What to implement:** {module_approach}\n"
+        f"{other_scope_note}\n\n"
+        f"**Files to create/modify (your scope only):**\n"
+        + "\n".join(f"- `{f}`" for f in files)
     )
     result = subprocess.run(
         [
@@ -343,17 +346,21 @@ def _emit_readme_node(
     artifact: PlanArtifact,
     milestone_slug: str,
     repo: str,
+    milestone_issue_number: int | None = None,
 ) -> GraphNode:
     """Emit a readme node that runs after all merges complete."""
+    context: dict = {
+        "milestone": milestone_slug,
+        "repo": repo,
+        "plan_artifact": artifact.model_dump(),
+    }
+    if milestone_issue_number:
+        context["milestone_issue_number"] = milestone_issue_number
     return GraphNode(
         id=f"{milestone_slug}-readme",
         type="readme",
         depends_on=[n.id for n in merge_nodes],
-        context={
-            "milestone": milestone_slug,
-            "repo": repo,
-            "plan_artifact": artifact.model_dump(),
-        },
+        context=context,
     )
 
 
@@ -431,12 +438,6 @@ class PlanHandler:
                 node, artifact, research_nodes, spec_file, repo_local_path, repo, milestone_slug
             )
             new_nodes = research_nodes + [refine_node]
-            _comment_on_issue(
-                repo,
-                milestone_issue_number,
-                f"**Plan:** low confidence ({artifact.confidence:.0%}) — filing research tasks first.\n\n"
-                f"Unknowns: {', '.join(artifact.unknowns[:3])}",
-            )
         else:
             build_nodes = _emit_build_nodes(
                 artifact,
@@ -446,21 +447,8 @@ class PlanHandler:
                 override_model=config.model or None,
             )
             merge_nodes = _emit_merge_nodes(build_nodes)
-            readme_node = _emit_readme_node(merge_nodes, artifact, milestone_slug, repo)
+            readme_node = _emit_readme_node(merge_nodes, artifact, milestone_slug, repo, milestone_issue_number)
             new_nodes = build_nodes + merge_nodes + [readme_node]
-            module_links = "\n".join(
-                f"- `{m}` → #{n.context['issue_number']}"
-                if n.context.get("issue_number")
-                else f"- `{m}`"
-                for m, n in zip(artifact.modules, build_nodes, strict=False)
-            )
-            _comment_on_issue(
-                repo,
-                milestone_issue_number,
-                f"**Plan complete** (confidence {artifact.confidence:.0%})\n\n"
-                f"{artifact.approach}\n\n"
-                f"**Modules:**\n{module_links}",
-            )
 
         return NodeResult(
             success=True,

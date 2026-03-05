@@ -5,6 +5,7 @@ Uses run_agent with Read/Write/Bash tools to write README.md and open a PR.
 
 from __future__ import annotations
 
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -51,7 +52,8 @@ Steps:
 5. `git add README.md && git commit -m "docs: add README"`
 6. `git push -u origin docs/readme`
 7. `gh pr create --repo {repo} --title "docs: add README" --body "Auto-generated README for {milestone}"`
-8. STOP. Do not merge.
+8. Wait for CI: `gh pr checks <PR-number> --watch --repo {repo}`
+9. Squash merge: `gh pr merge <PR-number> --repo {repo} --squash --delete-branch`
 """
 
 
@@ -87,5 +89,30 @@ class ReadmeHandler:
                 success=False,
                 error=f"readme agent exit {result.exit_code}: {(result.stderr or '')[:200]}",
             )
+
+        # Close the milestone driver issue with a single summary comment
+        milestone_issue_number: int | None = node.context.get("milestone_issue_number")
+        if milestone_issue_number:
+            modules = plan_artifact.get("modules", [])
+            files_per_module = plan_artifact.get("files_per_module", {})
+            module_lines = "\n".join(
+                f"- `{m}`: {', '.join(f'`{f}`' for f in files_per_module.get(m, []))}"
+                for m in modules
+            )
+            summary = (
+                f"**`{milestone}` complete.** All modules built and merged.\n\n"
+                f"{module_lines}"
+            )
+            subprocess.run(
+                ["gh", "issue", "close", str(milestone_issue_number), "--repo", repo,
+                 "--comment", summary],
+                capture_output=True,
+                text=True,
+            )
+            if self._store:
+                bead = self._store.read_work_bead(milestone_issue_number)
+                if bead:
+                    bead.state = "closed"  # type: ignore[assignment]
+                    self._store.write_work_bead(bead)
 
         return NodeResult(success=True, output={"readme": True, "repo": repo})

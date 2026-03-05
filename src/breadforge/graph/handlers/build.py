@@ -305,16 +305,6 @@ class BuildHandler:
                 MergeQueueItem(pr_number=pr_number, issue_number=issue_number, branch=branch)
             )
 
-        # Comment progress on the milestone issue
-        milestone_issue = node.context.get("milestone_issue_number")
-        if milestone_issue:
-            module = node.context.get("module", "")
-            _post_comment(
-                repo,
-                milestone_issue,
-                f"**`{module}` module done** — PR #{pr_number} opened on `{branch}`",
-            )
-
         out: dict = {"pr_number": pr_number, "branch": branch, "model": model}
         if result.cost_usd is not None:
             out["cost_usd"] = result.cost_usd

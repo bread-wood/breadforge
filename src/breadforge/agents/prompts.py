@@ -58,20 +58,35 @@ Steps:
 2. Read the full issue: `gh issue view {issue_number} --repo {repo}`
 3. Before writing any code, reason through the approach, identify constraints, and plan the implementation.
 4. Implement the changes.{" Only modify files within: " + ", ".join(allowed_scope) if allowed_scope and not workspace_ready else ""}
-5. Run tests — all must pass.
-6. Run lint — must be clean.
-7. Commit referencing the issue: `git commit -m "feat: <description> (closes #{issue_number})"`
-8. `git push`
-9. Create PR: `gh pr create --repo {repo} --title "<title>" --body "Closes #{issue_number}"`
-10. Watch CI: `gh pr checks <PR-number> --watch`
-11. Read feedback: `gh pr view <PR-number> --json reviews,comments`
+5. Write comprehensive tests for every file you create or modify. For each module:
+   - Unit test every public function and class method with meaningful inputs
+   - Cover edge cases, error paths, and boundary conditions
+   - Do not write trivial smoke tests that only check a function runs without error
+   - Aim for full branch coverage of the logic you implement
+6. Run tests — all must pass.
+7. Run lint — must be clean.
+8. Commit referencing the issue: `git commit -m "feat: <description> (closes #{issue_number})"`
+9. `git push`
+10. Create PR: `gh pr create --repo {repo} --title "<title>" --body "Closes #{issue_number}"`
+11. Watch CI: `gh pr checks <PR-number> --watch`
+12. Read feedback: `gh pr view <PR-number> --json reviews,comments`
     Inline comments: `gh api repos/{repo}/pulls/<PR-number>/comments`
-12. Triage feedback:
+13. Triage feedback:
     - Fix now: in scope and clear → fix, push, re-check
     - File issue: valid but out of scope → `gh issue create --repo {repo}`
     - Skip: false positive → note in PR comment
-13. STOP. Do not merge.
-"""
+14. STOP. Do not merge.
+
+IMPORTANT — if you find that some or all of the work described in this issue has already
+been implemented by a previous PR, you MUST leave a comment on the issue explaining:
+- Which parts were already done and by which PR(s) (check `gh pr list --repo {repo} --state merged`)
+- Which parts (if any) remained and what you implemented
+- Why the diff is small if that is the case
+
+Example comment:
+  `gh issue comment {issue_number} --repo {repo} --body "Most of this was already implemented in PR #X (module-foo) and PR #Y (module-bar). The remaining gap was [describe]. This PR adds [describe]."`
+
+Do this BEFORE creating the PR so the context is visible on the issue."""
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +138,11 @@ Produce a JSON object matching this schema exactly (no markdown fences):
     "<module1>": ["<path/to/file.py>", ...],
     "<module2>": ["<path/to/file.py>", ...]
   }},
-  "approach": "<1-3 sentence summary of the implementation approach>",
+  "approach": "<1-3 sentence high-level summary of the overall implementation strategy>",
+  "module_approaches": {{
+    "<module1>": "<1-2 sentences: exactly what this ticket must implement — specific to this module only>",
+    "<module2>": "<1-2 sentences: exactly what this ticket must implement — specific to this module only>"
+  }},
   "confidence": <0.0-1.0>,
   "unknowns": ["<open question>", ...],
   "risk_flags": ["novel-domain" | "security" | "multi-module-coordination" | ...]
@@ -138,4 +157,6 @@ Rules:
 - if the spec has no Goals/Scope, infer from the overview what "done" means
 - risk_flags: include "security" if auth/crypto involved, "novel-domain" if unfamiliar domain,
   "multi-module-coordination" if modules share mutable state
+- module_approaches: every module in "modules" must have an entry; describe only what that
+  specific ticket does — not work belonging to other modules
 """

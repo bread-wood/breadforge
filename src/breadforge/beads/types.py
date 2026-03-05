@@ -155,6 +155,8 @@ class PlanArtifact(BaseModel):
     files_per_module: dict[str, list[str]]
     """module → explicit file paths the build node may touch."""
     approach: str
+    module_approaches: dict[str, str] = Field(default_factory=dict)
+    """Per-module description of what each ticket should specifically implement."""
     confidence: float = Field(ge=0.0, le=1.0)
     """< 0.6 → emit research nodes before building."""
     unknowns: list[str] = Field(default_factory=list)

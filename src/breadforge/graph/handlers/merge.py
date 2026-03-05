@@ -505,18 +505,6 @@ Address every comment. Do not ignore any reviewer feedback."""
                 f"PR #{pr_number} merged.",
             )
             _gh("issue", "close", str(module_issue_number), "--repo", repo)
-        # Comment progress on the milestone issue
-        if milestone_issue_number:
-            _gh(
-                "issue",
-                "comment",
-                str(milestone_issue_number),
-                "--repo",
-                repo,
-                "--body",
-                f"PR #{pr_number} merged to main.",
-            )
-
         return NodeResult(
             success=True,
             output={"pr_number": pr_number, "merged": True},
