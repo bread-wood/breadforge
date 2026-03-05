@@ -56,13 +56,14 @@ class TestRollingDispatcher:
             patch("breadforge.dispatch._get_pr_number") as mock_pr,
             patch("breadforge.dispatch._claim_issue"),
             patch("breadforge.dispatch._unclaim_issue"),
-            patch("breadforge.dispatch.run_agent") as mock_run,
-            patch("breadforge.dispatch.assess_and_allocate") as mock_assess,
+            patch("breadforge.dispatch.run_agent", new_callable=AsyncMock) as mock_run,
+            patch("breadforge.dispatch.assess_and_allocate", new_callable=AsyncMock) as mock_assess,
         ):
             mock_issue.return_value = {"title": "Test Issue", "body": "Do the thing", "labels": []}
-            mock_pr.return_value = 100
+            # Return distinct PR numbers so beads don't overwrite each other in the store
+            _pr_counter = iter([101, 102])
+            mock_pr.side_effect = lambda *a, **kw: next(_pr_counter)
             mock_run.return_value = _make_run_result(exit_code=0)
-            mock_run = AsyncMock(return_value=_make_run_result(exit_code=0))
             from breadforge.assessor import AllocationResult, ComplexityEstimate, ComplexityTier
 
             mock_assess.return_value = (
@@ -72,9 +73,8 @@ class TestRollingDispatcher:
                 ),
             )
 
-            with patch("breadforge.dispatch.run_agent", new_callable=lambda: lambda: mock_run):
-                dispatcher = RollingDispatcher(config, store, logger)
-                await dispatcher.run([1, 2])
+            dispatcher = RollingDispatcher(config, store, logger)
+            await dispatcher.run([1, 2])
 
         # Both issues should have PR beads
         pr_beads = store.list_pr_beads()
