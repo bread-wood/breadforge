@@ -112,7 +112,21 @@ def run_health_checks(repo: str) -> HealthReport:
             )
         )
 
-    # 6. Not running inside Claude Code (nesting guard)
+    # 6. Credential proxy secret
+    if os.environ.get("BREADFORGE_PROXY_SECRET"):
+        checks.append(
+            CheckResult("proxy-secret", CheckStatus.PASS, "BREADFORGE_PROXY_SECRET is set")
+        )
+    else:
+        checks.append(
+            CheckResult(
+                "proxy-secret",
+                CheckStatus.WARN,
+                "BREADFORGE_PROXY_SECRET not set — proxy will use an ephemeral per-session key",
+            )
+        )
+
+    # 7. Not running inside Claude Code (nesting guard)
     if os.environ.get("BREADFORGE_AGENT") == "1":
         checks.append(
             CheckResult(

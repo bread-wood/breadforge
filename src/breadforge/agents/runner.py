@@ -36,11 +36,23 @@ class RunResult:
         return None
 
 
-def _build_env(model: str) -> dict[str, str]:
-    """Build subprocess environment — explicit allowlist, no credential leakage."""
+def _build_env(
+    model: str,
+    *,
+    proxy_url: str | None = None,
+    proxy_token: str | None = None,
+) -> dict[str, str]:
+    """Build subprocess environment — explicit allowlist, no credential leakage.
+
+    When *proxy_url* and *proxy_token* are supplied the agent subprocess routes
+    its Anthropic API calls through the loopback credential proxy instead of
+    receiving the real API key directly.  Raw API keys for other services are
+    withheld when the proxy is active so that the scoped token is the only
+    credential available to the agent.
+    """
     env: dict[str, str] = {}
 
-    for key in (
+    always_pass = (
         "HOME",
         "PATH",
         "SHELL",
@@ -51,15 +63,25 @@ def _build_env(model: str) -> dict[str, str]:
         "TERM",
         "GH_TOKEN",
         "GITHUB_TOKEN",
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "GOOGLE_API_KEY",
         "BREADMIN_DB_PATH",
         "BREADFORGE_MODEL",
-    ):
+    )
+    for key in always_pass:
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
+
+    if proxy_url and proxy_token:
+        # Route the agent's Anthropic calls through the credential proxy.
+        # Do NOT forward real API keys — the scoped token is the only credential.
+        env["ANTHROPIC_BASE_URL"] = proxy_url
+        env["ANTHROPIC_API_KEY"] = proxy_token
+    else:
+        # No proxy: forward real API keys from the orchestrator environment.
+        for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"):
+            val = os.environ.get(key)
+            if val is not None:
+                env[key] = val
 
     env["BREADFORGE_MODEL"] = model
     env["BREADFORGE_AGENT"] = "1"
@@ -79,18 +101,34 @@ async def run_agent(
     timeout_minutes: int = 60,
     cwd: Path | None = None,
     allowed_tools: list[str] | None = None,
+    proxy_url: str | None = None,
+    proxy_token: str | None = None,
 ) -> RunResult:
-    """Spawn a headless Claude Code agent and wait for completion."""
+    """Spawn a headless Claude Code agent and wait for completion.
+
+    When *proxy_url* and *proxy_token* are provided the subprocess routes its
+    Anthropic API requests through the loopback credential proxy rather than
+    using a raw API key.
+    """
     start = datetime.now(UTC)
 
     # Prompt must come before --allowedTools; otherwise the claude CLI
     # misparses the positional argument and raises "Input must be provided".
-    cmd = ["claude", "--output-format", "stream-json", "--verbose", "--model", model, "--print", prompt]
+    cmd = [
+        "claude",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--model",
+        model,
+        "--print",
+        prompt,
+    ]
 
     if allowed_tools:
         cmd += ["--allowedTools", ",".join(allowed_tools)]
 
-    env = _build_env(model)
+    env = _build_env(model, proxy_url=proxy_url, proxy_token=proxy_token)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
