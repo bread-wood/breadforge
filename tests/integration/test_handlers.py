@@ -50,6 +50,10 @@ def fake_run_result(
 # ---------------------------------------------------------------------------
 
 
+_SETUP_WORKSPACE = "breadforge.graph.handlers.build._setup_workspace"
+_VERIFY_SCOPE = "breadforge.graph.handlers.build._verify_pr_scope"
+
+
 class TestBuildHandler:
     def test_success_no_issue(self, config: Config, store: BeadStore, tmp_path: Path) -> None:
         node = GraphNode(
@@ -63,6 +67,8 @@ class TestBuildHandler:
         )
 
         with (
+            patch(_SETUP_WORKSPACE, return_value=None),
+            patch(_VERIFY_SCOPE, return_value=[]),
             patch("breadforge.graph.handlers.build.run_agent", new_callable=AsyncMock) as mock_run,
             patch("breadforge.graph.handlers.build._get_pr_number", return_value=42),
             patch("breadforge.graph.handlers.build._claim_issue"),
@@ -99,6 +105,7 @@ class TestBuildHandler:
         )
 
         with (
+            patch(_SETUP_WORKSPACE, return_value=None),
             patch("breadforge.graph.handlers.build.run_agent", new_callable=AsyncMock) as mock_run,
             patch(
                 "breadforge.agents.assessor.assess_and_allocate", new_callable=AsyncMock
@@ -131,6 +138,7 @@ class TestBuildHandler:
         )
 
         with (
+            patch(_SETUP_WORKSPACE, return_value=None),
             patch("breadforge.graph.handlers.build.run_agent", new_callable=AsyncMock) as mock_run,
             patch("breadforge.graph.handlers.build._get_pr_number", return_value=None),
             patch(
@@ -157,6 +165,43 @@ class TestBuildHandler:
         assert not result.success
         assert "no PR" in result.error
 
+    def test_scope_violation_fails(self, config: Config, store: BeadStore) -> None:
+        """PR that touches out-of-scope files should fail with an error."""
+        node = GraphNode(
+            id="v1-build-core",
+            type="build",
+            context={"module": "core", "files": ["src/core.py"], "milestone": "v1.0"},
+        )
+
+        with (
+            patch(_SETUP_WORKSPACE, return_value=None),
+            patch(_VERIFY_SCOPE, return_value=["src/other.py"]),
+            patch("breadforge.graph.handlers.build.run_agent", new_callable=AsyncMock) as mock_run,
+            patch("breadforge.graph.handlers.build._get_pr_number", return_value=42),
+            patch("breadforge.graph.handlers.build._gh"),
+            patch(
+                "breadforge.agents.assessor.assess_and_allocate", new_callable=AsyncMock
+            ) as mock_assess,
+        ):
+            from breadforge.agents.assessor import (
+                AllocationResult,
+                ComplexityEstimate,
+                ComplexityTier,
+            )
+
+            mock_assess.return_value = (
+                AllocationResult(model="claude-sonnet-4-6", tier=ComplexityTier.MEDIUM),
+                ComplexityEstimate(
+                    tier=ComplexityTier.MEDIUM, confidence=0.8, reasoning="test", model_used="test"
+                ),
+            )
+            mock_run.return_value = fake_run_result(exit_code=0)
+            handler = BuildHandler(store=store)
+            result = asyncio.run(handler.execute(node, config))
+
+        assert not result.success
+        assert "scope violation" in result.error
+
     def test_uses_plan_artifact_for_assessment(self, store: BeadStore) -> None:
         from breadforge.beads.types import PlanArtifact
 
@@ -181,6 +226,8 @@ class TestBuildHandler:
         )
 
         with (
+            patch(_SETUP_WORKSPACE, return_value=None),
+            patch(_VERIFY_SCOPE, return_value=[]),
             patch("breadforge.graph.handlers.build.run_agent", new_callable=AsyncMock) as mock_run,
             patch("breadforge.graph.handlers.build._get_pr_number", return_value=99),
         ):
@@ -212,7 +259,9 @@ class TestMergeHandler:
         def _gh_side_effect(*args):
             result = MagicMock()
             result.returncode = 0
-            result.stdout = json.dumps([])
+            # gh pr view --json statusCheckRollup returns a dict (not array)
+            # empty checks = CI passing
+            result.stdout = json.dumps({"statusCheckRollup": []})
             result.stderr = ""
             return result
 
