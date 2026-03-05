@@ -164,7 +164,7 @@ def build_agent_prompt(
     if allowed_scope:
         scope_note = f"\nAllowed scope (only modify files within): {', '.join(allowed_scope)}"
 
-    return f"""You are implementing GitHub issue #{issue_number} on branch `{branch}` in repo `{repo}`.
+    return f"""You are implementing GitHub issue #{issue_number} in repo `{repo}` on branch `{branch}`.
 
 Issue: {issue_title}
 
@@ -172,21 +172,26 @@ Issue: {issue_title}
 {scope_note}
 
 Steps:
-1. `git checkout {branch}`
-2. Read the full issue: `gh issue view {issue_number}`
+1. Clone the repo and create your branch:
+   ```
+   gh repo clone {repo} .
+   git checkout -b {branch}
+   git push -u origin {branch}
+   ```
+2. Read the full issue: `gh issue view {issue_number} --repo {repo}`
 3. Before writing any code, reason through the approach, identify constraints, and plan the module breakdown.
-4. Implement the changes within allowed scope.
+4. Implement the changes.{" Only modify files within: " + ", ".join(allowed_scope) if allowed_scope else ""}
 5. Run tests — all must pass.
 6. Run lint — must be clean.
-7. Commit with a message referencing the issue.
-8. `git push -u origin {branch}`
-9. Create PR: `gh pr create --title "<title>" --body "Closes #{issue_number}"`
+7. Commit referencing the issue: `git commit -m "feat: <description> (closes #{issue_number})"`
+8. `git push`
+9. Create PR: `gh pr create --repo {repo} --title "<title>" --body "Closes #{issue_number}"`
 10. Watch CI: `gh pr checks <PR-number> --watch`
-11. Read all CI and review feedback: `gh pr view <PR-number> --json reviews,comments`
-    and check inline comments: `gh api repos/{repo}/pulls/<PR-number>/comments`
-12. Triage each piece of feedback:
-    - Fix now: if in scope and straightforward, fix, push, re-check CI
-    - File issue: if valid but out of scope, create issue and note in PR comment
-    - Skip: if false positive, note why in PR comment
+11. Read feedback: `gh pr view <PR-number> --json reviews,comments`
+    Inline comments: `gh api repos/{repo}/pulls/<PR-number>/comments`
+12. Triage feedback:
+    - Fix now: in scope and clear → fix, push, re-check
+    - File issue: valid but out of scope → `gh issue create --repo {repo}`
+    - Skip: false positive → note in PR comment
 13. STOP. Do not merge.
 """

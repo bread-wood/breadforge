@@ -50,6 +50,54 @@ def _require_repo(repo: str | None) -> str:
     raise typer.Exit(1)
 
 
+_REQUIRED_LABELS = [
+    ("stage/impl", "0075ca", "Implementation task"),
+    ("stage/research", "0075ca", "Research task"),
+    ("stage/design", "0075ca", "Design task"),
+    ("P0", "b60205", "Release blocker"),
+    ("P1", "d93f0b", "High priority"),
+    ("P2", "e4e669", "Normal priority"),
+    ("P3", "0e8a16", "Low priority"),
+    ("P4", "c5def5", "Backlog"),
+    ("in-progress", "f9d0c4", "Claimed by an agent"),
+    ("bug", "d73a4a", "Something isn't working"),
+    ("triage", "e4e669", "Pending triage"),
+]
+
+
+def _scaffold_repo(repo: str) -> None:
+    """Ensure all required labels exist on the repo. Idempotent."""
+    # Get existing labels
+    r = subprocess.run(
+        ["gh", "label", "list", "--repo", repo, "--json", "name", "--limit", "100"],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        existing = {item["name"] for item in json.loads(r.stdout)}
+    except (json.JSONDecodeError, KeyError):
+        existing = set()
+
+    for name, color, description in _REQUIRED_LABELS:
+        if name not in existing:
+            subprocess.run(
+                [
+                    "gh",
+                    "label",
+                    "create",
+                    name,
+                    "--repo",
+                    repo,
+                    "--color",
+                    color,
+                    "--description",
+                    description,
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+
 def _get_store(config: Config) -> BeadStore:
     return BeadStore(config.beads_dir, config.repo)
 
@@ -198,6 +246,11 @@ def run(
         for c in report.fatal:
             console.print(f"[red]FATAL[/red] {c.name}: {c.message}")
         raise typer.Exit(1)
+
+    # Scaffold repo: labels, default branch protection
+    if not dry_run:
+        console.print(f"Scaffolding {repo}...")
+        _scaffold_repo(repo)
 
     store = _get_store(config)
     logger = _get_logger(config)
@@ -350,11 +403,11 @@ def plan(
     repo = _require_repo(repo)
     config = Config.from_env(repo)
     store = _get_store(config)
-    logger = _get_logger(config)
+
+    _scaffold_repo(repo)
 
     from breadforge.beads import CampaignBead, MilestonePlan
 
-    _ = logger  # reserved for future use
     campaign = store.read_campaign_bead() or CampaignBead(repo=repo)
     total_filed = 0
 
@@ -410,19 +463,66 @@ def init(
         raise typer.Exit(1)
 
 
+def _build_status_table(
+    store: BeadStore,
+    repo: str,
+    milestone: str | None,
+) -> Table:
+    beads = store.list_work_beads(milestone=milestone)
+    state_colors = {
+        "open": "dim",
+        "claimed": "yellow",
+        "pr_open": "blue",
+        "merge_ready": "green",
+        "closed": "green",
+        "abandoned": "red",
+    }
+    table = Table(
+        title=f"Work Beads — {repo}" + (f" / {milestone}" if milestone else ""),
+        expand=True,
+    )
+    table.add_column("Issue", style="cyan", justify="right")
+    table.add_column("Title")
+    table.add_column("State")
+    table.add_column("Retries", justify="right")
+    table.add_column("Branch")
+    table.add_column("PR", justify="right")
+    for bead in sorted(beads, key=lambda b: b.issue_number):
+        color = state_colors.get(bead.state, "white")
+        table.add_row(
+            str(bead.issue_number),
+            bead.title[:50],
+            f"[{color}]{bead.state}[/{color}]",
+            str(bead.retry_count) if bead.retry_count else "",
+            bead.branch or "",
+            str(bead.pr_number) if bead.pr_number else "",
+        )
+    return table
+
+
 @app.command()
 def status(
     repo: Annotated[str | None, typer.Option()] = None,
     milestone: Annotated[str | None, typer.Option()] = None,
+    watch: Annotated[bool, typer.Option("--watch", "-w", help="Refresh every 3s.")] = False,
 ) -> None:
-    """Show live bead state table."""
+    """Show bead state table. Use --watch for live refresh."""
     repo = _require_repo(repo)
     config = Config.from_env(repo)
     store = _get_store(config)
 
-    beads = store.list_work_beads(milestone=milestone)
+    if watch:
+        import time
 
-    if not beads:
+        from rich.live import Live
+
+        with Live(console=console, refresh_per_second=1) as live:
+            while True:
+                live.update(_build_status_table(store, repo, milestone))
+                time.sleep(3)
+        return
+
+    if not store.list_work_beads(milestone=milestone):
         console.print("No work beads found.")
         return
 
@@ -440,36 +540,7 @@ def status(
             }.get(m.status, "white")
             console.print(f"  [{status_color}]{m.status:15}[/{status_color}] {m.milestone}")
 
-    # Work beads table
-    table = Table(title=f"Work Beads — {repo}" + (f" / {milestone}" if milestone else ""))
-    table.add_column("Issue", style="cyan", justify="right")
-    table.add_column("Title")
-    table.add_column("State")
-    table.add_column("Retries", justify="right")
-    table.add_column("Branch")
-    table.add_column("PR", justify="right")
-
-    state_colors = {
-        "open": "dim",
-        "claimed": "yellow",
-        "pr_open": "blue",
-        "merge_ready": "green",
-        "closed": "green",
-        "abandoned": "red",
-    }
-
-    for bead in sorted(beads, key=lambda b: b.issue_number):
-        color = state_colors.get(bead.state, "white")
-        table.add_row(
-            str(bead.issue_number),
-            bead.title[:50],
-            f"[{color}]{bead.state}[/{color}]",
-            str(bead.retry_count) if bead.retry_count else "",
-            bead.branch or "",
-            str(bead.pr_number) if bead.pr_number else "",
-        )
-
-    console.print(table)
+    console.print(_build_status_table(store, repo, milestone))
 
     # Active agents (slots in dispatch)
     queue = store.read_merge_queue()
@@ -649,6 +720,10 @@ def repo_add(
     )
     registry.add(entry)
     console.print(f"[green]Registered[/green] {repo_name}")
+
+    # Scaffold labels and milestones
+    _scaffold_repo(repo_name)
+    console.print("  labels scaffolded")
 
     # Add yeast-bot as collaborator
     r = subprocess.run(
