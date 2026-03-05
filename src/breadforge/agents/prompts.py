@@ -14,29 +14,50 @@ def build_agent_prompt(
     branch: str,
     repo: str,
     allowed_scope: list[str] | None = None,
+    workspace_ready: bool = False,
 ) -> str:
     """Build the standard sub-agent prompt for impl work."""
-    scope_note = ""
-    if allowed_scope:
-        scope_note = f"\nAllowed scope (only modify files within): {', '.join(allowed_scope)}"
+    if workspace_ready:
+        scope_lines = ""
+        if allowed_scope:
+            file_list = "\n".join(f"  - {f}" for f in allowed_scope)
+            scope_lines = f"""
+SCOPE ENFORCEMENT IS ACTIVE. A pre-commit hook will REJECT any commit that modifies
+files outside the allowed list. Do not use --no-verify or --no-gpg-sign to bypass it.
+
+Allowed files (create or modify ONLY these):
+{file_list}
+
+If you need a file not on this list, check whether it belongs to another module.
+Do not modify pyproject.toml, CLAUDE.md, or README.md unless they are on the list above.
+"""
+        setup_step = f"""\
+1. The repo is already cloned in the current directory and branch `{branch}` is already
+   created and pushed to origin. Do NOT run `git clone` or `git checkout -b`.
+   Verify you are on the right branch: `git branch --show-current` (should print `{branch}`)."""
+    else:
+        scope_lines = ""
+        if allowed_scope:
+            scope_lines = f"\nAllowed scope (only modify files within): {', '.join(allowed_scope)}"
+        setup_step = f"""\
+1. Clone the repo and create your branch:
+   ```
+   gh repo clone {repo} .
+   git checkout -b {branch}
+   git push -u origin {branch}
+   ```"""
 
     return f"""You are implementing GitHub issue #{issue_number} in repo `{repo}` on branch `{branch}`.
 
 Issue: {issue_title}
 
 {issue_body}
-{scope_note}
-
+{scope_lines}
 Steps:
-1. Clone the repo and create your branch:
-   ```
-   gh repo clone {repo} .
-   git checkout -b {branch}
-   git push -u origin {branch}
-   ```
+{setup_step}
 2. Read the full issue: `gh issue view {issue_number} --repo {repo}`
-3. Before writing any code, reason through the approach, identify constraints, and plan the module breakdown.
-4. Implement the changes.{" Only modify files within: " + ", ".join(allowed_scope) if allowed_scope else ""}
+3. Before writing any code, reason through the approach, identify constraints, and plan the implementation.
+4. Implement the changes.{" Only modify files within: " + ", ".join(allowed_scope) if allowed_scope and not workspace_ready else ""}
 5. Run tests — all must pass.
 6. Run lint — must be clean.
 7. Commit referencing the issue: `git commit -m "feat: <description> (closes #{issue_number})"`
