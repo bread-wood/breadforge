@@ -1,0 +1,36 @@
+name: Pipeline
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    # Only trigger when stage/impl label is added and the issue has a milestone
+    if: github.event.label.name == 'stage/impl' && github.event.issue.milestone != null
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Dispatch issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          uv run breadforge run-issue \
+            --issue ${{ github.event.issue.number }} \
+            --repo ${{ github.repository }}
