@@ -60,14 +60,16 @@ def _read_codebase_summary(repo_local_path: str | None) -> str:
 
     inventory_lines: list[str] = []
     py_files = sorted(
-        f for sd in src_dirs for f in sd.rglob("*.py")
+        f
+        for sd in src_dirs
+        for f in sd.rglob("*.py")
         if "test" not in f.parts and "__pycache__" not in f.parts
     )[:150]
 
     for py_file in py_files:
-        with contextlib.suppress(OSError):
+        try:
             text = py_file.read_text(encoding="utf-8")
-        else:
+        except OSError:
             continue
         rel = py_file.relative_to(root)
         classes = re.findall(r"^class (\w+)", text, re.MULTILINE)
@@ -85,7 +87,9 @@ def _read_codebase_summary(repo_local_path: str | None) -> str:
             inventory_lines.append(f"  {parts_line}")
 
     if inventory_lines:
-        parts.append("=== Source inventory (what is already implemented) ===\n" + "\n".join(inventory_lines))
+        parts.append(
+            "=== Source inventory (what is already implemented) ===\n" + "\n".join(inventory_lines)
+        )
 
     # 4. Test coverage
     test_summary: list[str] = []
@@ -120,8 +124,16 @@ async def _call_plan_llm(
     codebase_ctx: str,
     research_findings: str,
     model: str,
+    plan_backend: str = "anthropic",
+    plan_model_override: str | None = None,
 ) -> PlanArtifact:
-    """Call Anthropic SDK to get a structured PlanArtifact."""
+    """Call an LLM backend to get a structured PlanArtifact.
+
+    Routing priority:
+    1. Non-anthropic backend (gemini / openai) → use backend registry directly.
+    2. anthropic backend with breadmin_llm available → use ProviderRegistry.
+    3. Fallback → Anthropic SDK directly.
+    """
     from breadforge.agents.prompts import PLAN_PROMPT
 
     prompt = PLAN_PROMPT.format(
@@ -130,29 +142,38 @@ async def _call_plan_llm(
         research_findings=research_findings[:2000],
     )
 
-    try:
-        from breadmin_llm.registry import ProviderRegistry
-        from breadmin_llm.types import LLMCall, LLMMessage, MessageRole
+    effective_model = plan_model_override or model
 
-        registry = ProviderRegistry.default()
-        call = LLMCall(
-            model=model,
-            messages=[LLMMessage(role=MessageRole.USER, content=prompt)],
-            max_tokens=1500,
-            caller="breadforge.plan",
-        )
-        response = await registry.complete(call)
+    if plan_backend != "anthropic":
+        from breadforge.backends import get_backend
+
+        backend = get_backend(plan_backend, model=plan_model_override)
+        response = await backend.complete(prompt, max_tokens=1500)
         text = response.content
-    except ImportError:
-        import anthropic
+    else:
+        try:
+            from breadmin_llm.registry import ProviderRegistry
+            from breadmin_llm.types import LLMCall, LLMMessage, MessageRole
 
-        client = anthropic.AsyncAnthropic()
-        response = await client.messages.create(
-            model=model,
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = response.content[0].text  # type: ignore[union-attr]
+            registry = ProviderRegistry.default()
+            call = LLMCall(
+                model=effective_model,
+                messages=[LLMMessage(role=MessageRole.USER, content=prompt)],
+                max_tokens=1500,
+                caller="breadforge.plan",
+            )
+            llm_response = await registry.complete(call)
+            text = llm_response.content
+        except ImportError:
+            import anthropic
+
+            client = anthropic.AsyncAnthropic()
+            sdk_response = await client.messages.create(
+                model=effective_model,
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = sdk_response.content[0].text  # type: ignore[union-attr]
 
     # Strip markdown fences
     text = text.strip()
@@ -230,7 +251,9 @@ def _comment_on_issue(repo: str, issue_number: int | None, body: str) -> None:
     )
 
 
-def _file_module_issue(repo: str, module: str, milestone_slug: str, artifact: PlanArtifact) -> int | None:
+def _file_module_issue(
+    repo: str, module: str, milestone_slug: str, artifact: PlanArtifact
+) -> int | None:
     """File a GitHub issue for a build module. Returns issue number or None on failure."""
     import subprocess
 
@@ -239,16 +262,21 @@ def _file_module_issue(repo: str, module: str, milestone_slug: str, artifact: Pl
         f"**Milestone:** {milestone_slug}\n"
         f"**Module:** `{module}`\n\n"
         f"**Approach:** {artifact.approach}\n\n"
-        f"**Files to create/modify:**\n"
-        + "\n".join(f"- `{f}`" for f in files)
+        f"**Files to create/modify:**\n" + "\n".join(f"- `{f}`" for f in files)
     )
     result = subprocess.run(
         [
-            "gh", "issue", "create",
-            "--repo", repo,
-            "--title", f"impl({milestone_slug}): {module} module",
-            "--body", body,
-            "--label", "stage/impl",
+            "gh",
+            "issue",
+            "create",
+            "--repo",
+            repo,
+            "--title",
+            f"impl({milestone_slug}): {module} module",
+            "--body",
+            body,
+            "--label",
+            "stage/impl",
         ],
         capture_output=True,
         text=True,
@@ -360,13 +388,15 @@ class PlanHandler:
         codebase_ctx = _read_codebase_summary(repo_local_path)
         research_findings = _gather_research_findings(research_node_ids, self._store)
 
-        # Prefer opus for planning if model is sonnet (planning deserves capability)
-        plan_model = config.model
-        if plan_model == "claude-sonnet-4-6":
-            plan_model = "claude-sonnet-4-6"  # keep sonnet as default; caller can override
-
         try:
-            artifact = await _call_plan_llm(spec_text, codebase_ctx, research_findings, plan_model)
+            artifact = await _call_plan_llm(
+                spec_text,
+                codebase_ctx,
+                research_findings,
+                config.model,
+                plan_backend=config.plan_backend,
+                plan_model_override=config.plan_model,
+            )
         except Exception as e:
             return NodeResult(success=False, error=f"plan LLM call failed: {e}")
 
@@ -394,9 +424,7 @@ class PlanHandler:
                 f"Unknowns: {', '.join(artifact.unknowns[:3])}",
             )
         else:
-            build_nodes = _emit_build_nodes(
-                artifact, repo, milestone_slug, milestone_issue_number
-            )
+            build_nodes = _emit_build_nodes(artifact, repo, milestone_slug, milestone_issue_number)
             merge_nodes = _emit_merge_nodes(build_nodes)
             readme_node = _emit_readme_node(merge_nodes, artifact, milestone_slug, repo)
             new_nodes = build_nodes + merge_nodes + [readme_node]
@@ -404,7 +432,7 @@ class PlanHandler:
                 f"- `{m}` → #{n.context['issue_number']}"
                 if n.context.get("issue_number")
                 else f"- `{m}`"
-                for m, n in zip(artifact.modules, build_nodes)
+                for m, n in zip(artifact.modules, build_nodes, strict=False)
             )
             _comment_on_issue(
                 repo,
