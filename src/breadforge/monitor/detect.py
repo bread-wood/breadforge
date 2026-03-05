@@ -47,17 +47,32 @@ def _detect_anomalies(
         if elapsed > zombie_minutes:
             ci_result = _gh(
                 "pr",
-                "checks",
+                "view",
                 str(pr_bead.pr_number),
                 "--repo",
                 repo,
                 "--json",
-                "name,state",
+                "statusCheckRollup",
             )
             try:
-                checks = json.loads(ci_result.stdout) if ci_result.returncode == 0 else []
-                states = [c.get("state", "").upper() for c in checks]
-                if any(s == "FAIL" for s in states):
+                data = json.loads(ci_result.stdout) if ci_result.stdout.strip() else {}
+                checks = data.get("statusCheckRollup") or []
+                ci_failing = False
+                for c in checks:
+                    # CheckRun: status=COMPLETED + conclusion=FAILURE/TIMED_OUT
+                    if c.get("__typename") == "CheckRun":
+                        if c.get("status") == "COMPLETED" and c.get("conclusion") in (
+                            "FAILURE",
+                            "TIMED_OUT",
+                            "STARTUP_FAILURE",
+                        ):
+                            ci_failing = True
+                            break
+                    # StatusContext: state=FAILURE/ERROR
+                    elif c.get("state") in ("FAILURE", "ERROR"):
+                        ci_failing = True
+                        break
+                if ci_failing:
                     anomalies.append(
                         AnomalyBead(
                             anomaly_id=f"zombie-{pr_bead.pr_number}-{int(now.timestamp())}",
