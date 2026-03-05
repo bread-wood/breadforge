@@ -70,6 +70,71 @@ def _post_comment(repo: str, issue_number: int, body: str) -> None:
     _gh("issue", "comment", str(issue_number), "--repo", repo, "--body", body)
 
 
+_PRE_COMMIT_HOOK = """\
+#!/bin/sh
+# breadforge scope enforcement — blocks commits touching out-of-scope files
+SCOPE_FILE="$(git rev-parse --show-toplevel)/.breadforge-scope"
+[ -f "$SCOPE_FILE" ] || exit 0
+
+STAGED=$(git diff --cached --name-only)
+VIOLATIONS=""
+for f in $STAGED; do
+  [ "$f" = ".breadforge-scope" ] && continue
+  grep -qxF "$f" "$SCOPE_FILE" || VIOLATIONS="$VIOLATIONS  $f\\n"
+done
+
+if [ -n "$VIOLATIONS" ]; then
+  printf "breadforge: commit blocked — files outside allowed scope:\\n%s" "$VIOLATIONS" >&2
+  printf "Allowed files listed in .breadforge-scope\\n" >&2
+  exit 1
+fi
+"""
+
+
+def _setup_workspace(workspace: Path, repo: str, branch: str, allowed_files: list[str]) -> str | None:
+    """Clone repo, create branch, install scope-enforcement pre-commit hook.
+
+    Returns an error string on failure, None on success.
+    """
+    # Clone (depth=1 for speed; agent can fetch more if needed)
+    r = subprocess.run(
+        ["gh", "repo", "clone", repo, str(workspace), "--", "--depth=1"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return f"clone failed: {r.stderr[:200]}"
+
+    # Create + push branch (ignore error if branch already exists)
+    subprocess.run(["git", "checkout", "-b", branch], capture_output=True, cwd=workspace)
+    subprocess.run(["git", "push", "-u", "origin", branch], capture_output=True, cwd=workspace)
+
+    if allowed_files:
+        # Write allowed-files manifest
+        (workspace / ".breadforge-scope").write_text("\n".join(allowed_files) + "\n")
+
+        # Install pre-commit hook
+        hook_path = workspace / ".git" / "hooks" / "pre-commit"
+        hook_path.write_text(_PRE_COMMIT_HOOK)
+        hook_path.chmod(0o755)
+
+    return None
+
+
+def _verify_pr_scope(pr_number: int, repo: str, allowed_files: list[str]) -> list[str]:
+    """Return list of out-of-scope files changed in the PR. Empty = clean."""
+    r = _gh("pr", "view", str(pr_number), "--repo", repo, "--json", "files")
+    if r.returncode != 0:
+        return []
+    try:
+        data = json.loads(r.stdout)
+        changed = {f["path"] for f in data.get("files", [])}
+    except (json.JSONDecodeError, KeyError):
+        return []
+    allowed = set(allowed_files) | {".breadforge-scope"}
+    return sorted(changed - allowed)
+
+
 def _get_issue(repo: str, issue_number: int) -> dict[str, Any]:
     r = _gh("issue", "view", str(issue_number), "--repo", repo, "--json", "title,body,labels")
     if r.returncode != 0:
@@ -124,6 +189,14 @@ class BuildHandler:
             issue_title = issue_data.get("title", issue_title)
             issue_body = issue_data.get("body", "")
 
+        # Set up workspace: clone, branch, scope-enforcement hook
+        workspace = Path(tempfile.mkdtemp(prefix=f"breadforge-{node.id}-"))
+        setup_error = _setup_workspace(workspace, repo, branch, files)
+        if setup_error:
+            if issue_number:
+                _unclaim_issue(repo, issue_number)
+            return NodeResult(success=False, error=f"workspace setup: {setup_error}")
+
         prompt = build_agent_prompt(
             issue_number=issue_number or 0,
             issue_title=issue_title,
@@ -131,9 +204,9 @@ class BuildHandler:
             branch=branch,
             repo=repo,
             allowed_scope=files or None,
+            workspace_ready=True,
         )
 
-        workspace = Path(tempfile.mkdtemp(prefix=f"breadforge-{node.id}-"))
         result = await run_agent(
             prompt,
             model=model,
@@ -182,6 +255,29 @@ class BuildHandler:
             if issue_number:
                 _unclaim_issue(repo, issue_number)
             return NodeResult(success=False, error="agent completed but no PR found")
+
+        # Verify scope: fail if any out-of-scope files were changed
+        if files:
+            violations = _verify_pr_scope(pr_number, repo, files)
+            if violations:
+                body = (
+                    "**Scope violation** — this PR modifies files outside the allowed scope.\n\n"
+                    "Out-of-scope files:\n"
+                    + "\n".join(f"- `{v}`" for v in violations)
+                    + "\n\nAllowed scope:\n"
+                    + "\n".join(f"- `{f}`" for f in files)
+                    + "\n\nPlease revert out-of-scope changes and push again."
+                )
+                _gh("pr", "comment", str(pr_number), "--repo", repo, "--body", body)
+                if self._logger:
+                    self._logger.error(
+                        f"PR #{pr_number} scope violation: {violations}",
+                        node_id=node.id,
+                    )
+                return NodeResult(
+                    success=False,
+                    error=f"scope violation in PR #{pr_number}: {violations}",
+                )
 
         # Update beads
         if self._store and issue_number:
