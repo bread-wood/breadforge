@@ -38,28 +38,54 @@ def _gh(*args: str) -> subprocess.CompletedProcess:
 
 
 def _pr_ci_passing(pr_number: int, repo: str) -> bool | None:
-    """Returns True if CI passing, False if failing, None if still running.
+    """Returns True if all CI checks passed, False if any failed, None if still running.
 
-    gh pr checks exits 1 when no checks exist — treat that as passing (no CI configured).
-    State values: PASS, FAIL, PENDING, NEUTRAL, STALE, SKIPPED.
+    Uses statusCheckRollup from gh pr view, which is reliable regardless of exit code.
+    CheckRun fields: status (QUEUED/IN_PROGRESS/COMPLETED), conclusion (SUCCESS/FAILURE/...).
+    StatusContext fields: state (PENDING/SUCCESS/FAILURE/ERROR/EXPECTED).
     """
-    result = _gh("pr", "checks", str(pr_number), "--repo", repo, "--json", "name,state")
+    result = _gh(
+        "pr", "view", str(pr_number), "--repo", repo,
+        "--json", "statusCheckRollup",
+    )
     if result.returncode != 0:
-        # No checks reported → treat as passing (empty CI = success)
-        if not result.stdout.strip():
-            return True
-        return None
+        return None  # can't determine — treat as still running
     try:
-        checks = json.loads(result.stdout)
+        data = json.loads(result.stdout)
+        checks = data.get("statusCheckRollup") or []
     except json.JSONDecodeError:
         return None
+
     if not checks:
-        return True  # no checks configured
-    states = [c.get("state", "").upper() for c in checks]
-    if any(s == "PENDING" for s in states):
-        return None
-    if any(s == "FAIL" for s in states):
-        return False
+        return True  # no CI configured
+
+    _FAILING_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED", "ERROR"}
+    _PASSING_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+
+    for check in checks:
+        typename = check.get("__typename", "")
+        if typename == "CheckRun":
+            status = check.get("status", "").upper()
+            conclusion = check.get("conclusion", "").upper()
+            if status != "COMPLETED":
+                return None  # still running
+            if conclusion in _FAILING_CONCLUSIONS:
+                return False
+        elif typename == "StatusContext":
+            state = check.get("state", "").upper()
+            if state == "PENDING":
+                return None
+            if state in ("FAILURE", "ERROR"):
+                return False
+        else:
+            # Unknown type — check for common fields
+            state = check.get("state", "").upper()
+            conclusion = check.get("conclusion", "").upper()
+            if state == "PENDING" or (not state and not conclusion):
+                return None
+            if state in ("FAILURE", "ERROR", "FAIL") or conclusion in _FAILING_CONCLUSIONS:
+                return False
+
     return True
 
 
