@@ -5,6 +5,7 @@ Key design:
 - _add_overlap_edges adds sequential deps between build nodes that touch the same files
 - GraphExecutor drives the async event loop: dispatch ready nodes, handle completions,
   expand graph when plan nodes emit new_nodes
+- BackendRouter (optional) overrides per-node model selection based on node type
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 from breadforge.beads.types import GraphNode, NodeType
-from breadforge.graph.node import NodeHandler, NodeResult
+from breadforge.graph.node import BackendRouter, NodeHandler, NodeResult
 
 if TYPE_CHECKING:
     from breadforge.beads.store import BeadStore
@@ -139,6 +140,7 @@ class GraphExecutor:
         concurrency: int = 3,
         watchdog_interval: float = 60.0,
         dry_run: bool = False,
+        backend_router: BackendRouter | None = None,
     ) -> None:
         self._config = config
         self._handlers = handlers
@@ -147,6 +149,7 @@ class GraphExecutor:
         self._concurrency = concurrency
         self._watchdog_interval = watchdog_interval
         self._dry_run = dry_run
+        self._backend_router = backend_router
 
     def _restore_from_store(self, graph: ExecutionGraph, result: ExecutionResult) -> None:
         """Restore terminal node states and replay plan node expansions.
@@ -262,8 +265,16 @@ class GraphExecutor:
         handler = self._handlers.get(node.type)
         if handler is None:
             return NodeResult(success=False, error=f"no handler for type {node.type!r}")
+        # Apply BackendRouter model override when the node has no explicit model
+        effective_config = self._config
+        if self._backend_router and not node.assigned_model:
+            routed_model = self._backend_router.route(node.type)
+            if routed_model and routed_model != self._config.model:
+                from dataclasses import replace
+
+                effective_config = replace(self._config, model=routed_model)
         try:
-            return await handler.execute(node, self._config)
+            return await handler.execute(node, effective_config)
         except Exception as e:
             return NodeResult(success=False, error=str(e))
 
@@ -396,6 +407,7 @@ def make_handlers(
 ) -> dict[NodeType, NodeHandler]:
     """Instantiate all handlers. Import lazily to avoid circular deps."""
     from breadforge.graph.handlers.build import BuildHandler
+    from breadforge.graph.handlers.consensus import ConsensusHandler, DesignDocHandler, WaitHandler
     from breadforge.graph.handlers.merge import MergeHandler
     from breadforge.graph.handlers.plan import PlanHandler
     from breadforge.graph.handlers.readme import ReadmeHandler
@@ -407,4 +419,8 @@ def make_handlers(
         "build": BuildHandler(store=store, logger=logger),
         "merge": MergeHandler(store=store, logger=logger),
         "readme": ReadmeHandler(store=store, logger=logger),
+        # consensus module
+        "wait": WaitHandler(store=store, logger=logger),
+        "consensus": ConsensusHandler(store=store, logger=logger),
+        "design_doc": DesignDocHandler(store=store, logger=logger),
     }
