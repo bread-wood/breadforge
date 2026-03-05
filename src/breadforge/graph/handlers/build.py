@@ -165,9 +165,12 @@ class BuildHandler:
         milestone: str = node.context.get("milestone", "")
         repo = config.repo
 
-        # Model selection
-        allocation = await self._assess(node, config)
-        model = node.assigned_model or allocation.model
+        # Model selection — prefer assigned_model set by plan handler; fall back to assessor
+        if node.assigned_model:
+            model = node.assigned_model
+        else:
+            allocation = await self._assess(node, config)
+            model = allocation.model
 
         # Branch name
         branch = node.context.get("branch") or self._make_branch(node.id, module)

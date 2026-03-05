@@ -73,7 +73,7 @@ class ResearchHandler:
             # Default: restricted subprocess claude with WebSearch/WebFetch only.
             result = await run_agent(
                 prompt,
-                model=config.model,
+                model=node.assigned_model or config.model,
                 timeout_minutes=RESEARCH_TIMEOUT_MINUTES,
                 allowed_tools=RESEARCH_ALLOWED_TOOLS,
             )

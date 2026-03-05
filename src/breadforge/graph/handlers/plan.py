@@ -185,6 +185,10 @@ async def _call_plan_llm(
     return PlanArtifact.model_validate(data)
 
 
+_RESEARCH_MODEL = "claude-haiku-4-5-20251001"
+"""Research nodes do web search only — haiku is sufficient and cheap."""
+
+
 def _emit_research_nodes(
     unknowns: list[str],
     parent_node: GraphNode,
@@ -197,6 +201,7 @@ def _emit_research_nodes(
         GraphNode(
             id=node_id,
             type="research",
+            assigned_model=_RESEARCH_MODEL,
             context={
                 "milestone": milestone_slug,
                 "repo": repo,
@@ -296,13 +301,21 @@ def _emit_build_nodes(
     repo: str,
     milestone_slug: str,
     milestone_issue_number: int | None = None,
+    override_model: str | None = None,
 ) -> list[GraphNode]:
-    """Emit one build node per module, filing a GH issue for each."""
+    """Emit one build node per module, filing a GH issue for each.
+
+    Model selection happens here — assessor runs once per module during planning
+    so build handlers don't need to call the assessor at dispatch time.
+    """
+    from breadforge.agents.assessor import assess_from_plan_artifact
+
     nodes = []
     for module in artifact.modules:
         files = artifact.files_per_module.get(module, [])
         module_slug = _slug(module)
         issue_number = _file_module_issue(repo, module, milestone_slug, artifact)
+        allocation = assess_from_plan_artifact(artifact, module, override_model=override_model)
         context: dict = {
             "milestone": milestone_slug,
             "module": module,
@@ -318,6 +331,7 @@ def _emit_build_nodes(
             GraphNode(
                 id=f"{milestone_slug}-build-{module_slug}",
                 type="build",
+                assigned_model=allocation.model,
                 context=context,
             )
         )
@@ -424,7 +438,13 @@ class PlanHandler:
                 f"Unknowns: {', '.join(artifact.unknowns[:3])}",
             )
         else:
-            build_nodes = _emit_build_nodes(artifact, repo, milestone_slug, milestone_issue_number)
+            build_nodes = _emit_build_nodes(
+                artifact,
+                repo,
+                milestone_slug,
+                milestone_issue_number,
+                override_model=config.model or None,
+            )
             merge_nodes = _emit_merge_nodes(build_nodes)
             readme_node = _emit_readme_node(merge_nodes, artifact, milestone_slug, repo)
             new_nodes = build_nodes + merge_nodes + [readme_node]
