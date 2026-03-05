@@ -6,7 +6,10 @@ import asyncio
 import json
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
+
+if TYPE_CHECKING:
+    from breadforge.graph.executor import ExecutionGraph
 
 import typer
 from rich.console import Console
@@ -331,6 +334,66 @@ def _seed_work_beads(
     return new_numbers
 
 
+def _print_dry_run_summary(
+    milestone: str,
+    graph: ExecutionGraph,
+    store: BeadStore | None,
+) -> None:
+    """Print a rich summary table of the dry-run plan output."""
+
+    console.print(f"\n[bold yellow][dry-run] Plan summary for {milestone}[/bold yellow]")
+
+    # Find the plan node to get the PlanArtifact
+    plan_node = None
+    build_nodes = []
+    for node in graph.all_nodes():
+        if node.type == "plan" and node.state == "done":
+            plan_node = node
+        elif node.type == "build":
+            build_nodes.append(node)
+
+    if plan_node and plan_node.output.get("artifact"):
+        artifact = plan_node.output["artifact"]
+        console.print(f"[dim]Approach:[/dim] {artifact.get('approach', '')}")
+        console.print(
+            f"[dim]Confidence:[/dim] {artifact.get('confidence', 0):.0%}  "
+            f"[dim]Risk:[/dim] {', '.join(artifact.get('risk_flags', [])) or 'none'}"
+        )
+        if artifact.get("unknowns"):
+            console.print(f"[dim]Unknowns resolved:[/dim] {', '.join(artifact['unknowns'][:3])}")
+
+    if not build_nodes:
+        console.print("[yellow]No build nodes emitted — check plan output above.[/yellow]")
+        return
+
+    table = Table(title="Work Beads (not dispatched)", show_lines=True)
+    table.add_column("Module", style="bold")
+    table.add_column("Issue #")
+    table.add_column("Files")
+    table.add_column("Bead State")
+
+    for node in sorted(build_nodes, key=lambda n: n.id):
+        module = node.context.get("module", node.id)
+        issue_number = node.context.get("issue_number")
+        files = node.context.get("files", [])
+        bead_state = "—"
+        if issue_number and store:
+            bead = store.read_work_bead(issue_number)
+            bead_state = bead.state if bead else "missing"
+        table.add_row(
+            module,
+            f"#{issue_number}" if issue_number else "—",
+            "\n".join(files[:6]) + ("\n…" if len(files) > 6 else ""),
+            bead_state,
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[green]{len(build_nodes)} work bead(s) created[/green] — "
+        "run without [bold]--dry-run[/bold] to dispatch agents."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -409,16 +472,9 @@ def run(
         f"(concurrency={config.concurrency})..."
     )
 
-    if dry_run:
-        console.print("[yellow][dry-run][/yellow] would dispatch:", all_issue_numbers)
-        return
-
     from breadforge.graph.builder import build_greenfield_graph
     from breadforge.graph.executor import GraphExecutor, make_handlers
 
-    # Build an initial graph: one plan node per spec
-    # (all_issue_numbers is legacy; for the graph path we use spec files directly)
-    # For backward compat: if we have spec paths, use graph; otherwise fall back.
     if _spec_paths:
         handlers = make_handlers(store=store, logger=logger)
         executor = GraphExecutor(
@@ -428,6 +484,7 @@ def run(
             logger=logger,
             concurrency=config.concurrency,
             watchdog_interval=float(config.watchdog_interval_seconds),
+            dry_run=dry_run,
         )
 
         # Clone the repo once for codebase assessment by the plan handler
@@ -451,12 +508,18 @@ def run(
                     repo_local_path=repo_local_path,
                     milestone_issue_number=milestone_issue,
                 )
-                console.print(f"  executing graph for {ms}...")
+                if dry_run:
+                    console.print(f"  [yellow][dry-run][/yellow] planning {ms} (research + plan LLMs will run)...")
+                else:
+                    console.print(f"  executing graph for {ms}...")
                 result = await executor.run(graph)
-                console.print(
-                    f"  {ms}: done={len(result.done)} failed={len(result.failed)} "
-                    f"abandoned={len(result.abandoned)}"
-                )
+                if dry_run:
+                    _print_dry_run_summary(ms, graph, store)
+                else:
+                    console.print(
+                        f"  {ms}: done={len(result.done)} failed={len(result.failed)} "
+                        f"abandoned={len(result.abandoned)}"
+                    )
 
         asyncio.run(_run_graph())
     else:
