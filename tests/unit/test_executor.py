@@ -42,10 +42,13 @@ def make_node(
 
 
 def mock_handler(success: bool = True, output: dict | None = None, error: str | None = None):
+    from unittest.mock import MagicMock
+
     handler = AsyncMock()
     handler.execute = AsyncMock(
         return_value=NodeResult(success=success, output=output or {}, error=error)
     )
+    handler.recover = MagicMock(return_value=None)  # recover() is sync; returns None by default
     return handler
 
 

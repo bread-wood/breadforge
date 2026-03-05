@@ -166,8 +166,17 @@ class BuildHandler:
                 error=f"agent exit {result.exit_code}: {(result.stderr or '')[:200]}",
             )
 
-        # Find the PR the agent created
+        # Find the PR the agent created — retry a few times for GitHub API latency
+        import asyncio as _asyncio
+
         pr_number = _get_pr_number(repo, branch)
+        if not pr_number:
+            # Wait up to 90s for the PR to appear (3 × 30s)
+            for _ in range(3):
+                await _asyncio.sleep(30)
+                pr_number = _get_pr_number(repo, branch)
+                if pr_number:
+                    break
 
         if not pr_number:
             if issue_number:
@@ -227,7 +236,7 @@ class BuildHandler:
         allocation, _ = await assess_and_allocate(issue_title, issue_body, override_model=override)
         return allocation
 
-    def recover(self, node: "GraphNode", config: "Config") -> "NodeResult | None":
+    def recover(self, node: GraphNode, config: Config) -> NodeResult | None:
         """If the node was running when breadforge crashed, check if a PR already exists."""
         branch = node.context.get("branch")
         if not branch:
@@ -246,5 +255,6 @@ class BuildHandler:
         return None  # no PR found — re-dispatch
 
     def _make_branch(self, node_id: str, module: str) -> str:
-        slug = (module or node_id).lower().replace(" ", "-").replace("/", "-")[:40]
+        import re
+        slug = re.sub(r"[^a-zA-Z0-9._-]", "-", (module or node_id).lower())[:40].strip("-")
         return f"graph-{slug}"
