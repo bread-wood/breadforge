@@ -142,36 +142,66 @@ async def _repair_agent(
             await _poll_repair_pr(abead, config.repo, logger)
 
 
+def _pr_ci_passing(pr_number: int, repo: str) -> bool | None:
+    """True=passing, False=failing, None=still running or unknown.
+
+    Uses statusCheckRollup (same as merge handler) — reliable regardless of exit code.
+    """
+    result = _gh("pr", "view", str(pr_number), "--repo", repo, "--json", "statusCheckRollup")
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+        checks = data.get("statusCheckRollup") or []
+    except json.JSONDecodeError:
+        return None
+
+    if not checks:
+        return True  # no CI configured
+
+    _FAILING = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED", "ERROR"}
+
+    for check in checks:
+        typename = check.get("__typename", "")
+        if typename == "CheckRun":
+            if check.get("status", "").upper() != "COMPLETED":
+                return None
+            if check.get("conclusion", "").upper() in _FAILING:
+                return False
+        elif typename == "StatusContext":
+            state = check.get("state", "").upper()
+            if state == "PENDING":
+                return None
+            if state in ("FAILURE", "ERROR"):
+                return False
+        else:
+            state = check.get("state", "").upper()
+            conclusion = check.get("conclusion", "").upper()
+            if state == "PENDING" or (not state and not conclusion):
+                return None
+            if state in ("FAILURE", "ERROR") or conclusion in _FAILING:
+                return False
+
+    return True
+
+
 async def _poll_repair_pr(abead: AnomalyBead, repo: str, logger: Logger) -> None:
     """Poll CI on a repair PR and merge if passing."""
     assert abead.repair_pr_number
 
-    ci_result = _gh(
-        "pr",
-        "checks",
-        str(abead.repair_pr_number),
-        "--repo",
-        repo,
-        "--json",
-        "name,state,conclusion",
-    )
-    try:
-        checks = json.loads(ci_result.stdout) if ci_result.returncode == 0 else []
-    except json.JSONDecodeError:
+    ci_status = _pr_ci_passing(abead.repair_pr_number, repo)
+
+    if ci_status is None:
+        return  # still running — check again next cycle
+
+    if ci_status is False:
+        abead.repair_branch = None
+        abead.repair_pr_number = None
+        abead.repair_attempts += 1
+        logger.repair(abead.anomaly_id, abead.issue_number, "repair_pr_ci_failed")
         return
 
-    if checks:
-        states = [c.get("state", "") for c in checks]
-        conclusions = [c.get("conclusion", "") for c in checks]
-        if any(s in ("IN_PROGRESS", "QUEUED") for s in states):
-            return
-        if any(c == "FAILURE" for c in conclusions):
-            abead.repair_branch = None
-            abead.repair_pr_number = None
-            abead.repair_attempts += 1
-            logger.repair(abead.anomaly_id, abead.issue_number, "repair_pr_ci_failed")
-            return
-
+    # CI passing — squash merge
     merge_result = _gh(
         "pr", "merge", str(abead.repair_pr_number), "--repo", repo, "--squash", "--delete-branch"
     )
