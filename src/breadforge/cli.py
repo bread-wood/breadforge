@@ -1104,5 +1104,115 @@ def repo_list() -> None:
     console.print(table)
 
 
+@app.command("gha-dispatch")
+def gha_dispatch(
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Dispatch a breadforge run from a GitHub Actions issues event.
+
+    Reads GITHUB_EVENT_NAME, GITHUB_EVENT_PATH, and GITHUB_REPOSITORY from
+    the environment (set automatically by GitHub Actions). Triggers the graph
+    executor when an issue is labeled with 'stage/impl' and has a milestone
+    whose spec file exists under specs/.
+    """
+    import json
+    import os
+
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+
+    if not repo:
+        console.print("[red]error:[/red] GITHUB_REPOSITORY not set")
+        raise typer.Exit(1)
+
+    if event_name != "issues":
+        console.print(f"[yellow]skip:[/yellow] event {event_name!r} is not 'issues'")
+        return
+
+    event: dict = {}
+    if event_path and Path(event_path).exists():
+        try:
+            event = json.loads(Path(event_path).read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            console.print(f"[red]error:[/red] could not parse event payload: {e}")
+            raise typer.Exit(1) from e
+
+    action = event.get("action", "")
+    label_name = (event.get("label") or {}).get("name", "")
+
+    if action != "labeled" or label_name != "stage/impl":
+        console.print(f"[yellow]skip:[/yellow] action={action!r} label={label_name!r}")
+        return
+
+    issue = event.get("issue") or {}
+    milestone_obj = issue.get("milestone") or {}
+    milestone = milestone_obj.get("title", "")
+    if not milestone:
+        console.print("[yellow]skip:[/yellow] issue has no milestone")
+        return
+
+    # Find spec file for this milestone under specs/
+    specs_dir = Path("specs")
+    spec_file: Path | None = None
+    if specs_dir.exists():
+        for candidate in sorted(specs_dir.glob("*.md")):
+            stem = candidate.stem
+            # Match by milestone slug: v0.2.0 matches v0-2-0 or v0.2.0 in filename
+            normalized = milestone.replace(".", "-").lower()
+            if normalized in stem.lower() or milestone.lower() in stem.lower():
+                spec_file = candidate
+                break
+
+    if not spec_file:
+        console.print(f"[yellow]skip:[/yellow] no spec found for milestone {milestone!r} in specs/")
+        return
+
+    console.print(f"GHA dispatch: repo={repo} milestone={milestone} spec={spec_file}")
+
+    if dry_run:
+        console.print("[yellow][dry-run][/yellow] would dispatch graph executor")
+        return
+
+    config = Config.from_env(repo)
+    store = _get_store(config)
+    logger = _get_logger(config)
+
+    issue_numbers = _run_single_spec(spec_file, repo, config, store, logger, milestone, dry_run=False)
+
+    if not issue_numbers:
+        console.print("No issues to dispatch.")
+        return
+
+    from breadforge.graph.builder import build_greenfield_graph
+    from breadforge.graph.executor import GraphExecutor, make_handlers
+
+    handlers = make_handlers(store=store, logger=logger)
+    executor = GraphExecutor(
+        config=config,
+        handlers=handlers,
+        store=store,
+        logger=logger,
+        concurrency=config.concurrency,
+        watchdog_interval=float(config.watchdog_interval_seconds),
+    )
+
+    graph = build_greenfield_graph(
+        milestone=milestone,
+        spec_file=spec_file,
+        repo=repo,
+        repo_local_path=str(Path.cwd()),
+        milestone_issue_number=issue_numbers[0] if issue_numbers else None,
+    )
+
+    result = asyncio.run(executor.run(graph))
+    console.print(
+        f"GHA dispatch done: done={len(result.done)} failed={len(result.failed)} "
+        f"abandoned={len(result.abandoned)}"
+    )
+    if result.failed or result.abandoned:
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()

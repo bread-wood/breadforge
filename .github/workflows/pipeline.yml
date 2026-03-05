@@ -4,15 +4,16 @@ on:
   issues:
     types: [labeled]
 
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
   dispatch:
-    if: github.event.label.name == 'stage/impl'
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      issues: write
-      pull-requests: write
+    # Only trigger when stage/impl label is added and the issue has a milestone
+    if: github.event.label.name == 'stage/impl' && github.event.issue.milestone != null
 
     steps:
       - uses: actions/checkout@v4
