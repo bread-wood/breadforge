@@ -847,6 +847,130 @@ def spec_cmd(
         console.print(f"[green]wrote:[/green] {path}")
 
 
+@app.command(name="run-issue")
+def run_issue(
+    issue: Annotated[int, typer.Option(help="GitHub issue number to dispatch.")],
+    repo: Annotated[str | None, typer.Option(help="owner/repo to operate on.")] = None,
+    concurrency: Annotated[int, typer.Option(help="Max parallel agents.")] = 1,
+    model: Annotated[str | None, typer.Option(help="Override model for all agents.")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Dispatch a single issue by number. Used by the GitHub Actions pipeline."""
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    if concurrency:
+        config.concurrency = concurrency
+    if model:
+        config.model = model
+
+    # Fetch issue metadata
+    r = subprocess.run(
+        [
+            "gh", "issue", "view", str(issue),
+            "--repo", repo,
+            "--json", "title,milestone,labels",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        console.print(f"[red]error:[/red] could not fetch issue #{issue}: {r.stderr.strip()}")
+        raise typer.Exit(1)
+    try:
+        issue_data = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        console.print(f"[red]error:[/red] could not parse issue #{issue} response")
+        raise typer.Exit(1) from None
+
+    milestone_title: str = (issue_data.get("milestone") or {}).get("title", "")
+    issue_title: str = issue_data.get("title", f"Issue #{issue}")
+
+    console.print(f"Dispatching issue #{issue}: {issue_title}")
+    if milestone_title:
+        console.print(f"  milestone: {milestone_title}")
+
+    if dry_run:
+        console.print("[yellow][dry-run][/yellow] would dispatch issue", issue)
+        return
+
+    # Health check
+    report = run_health_checks(repo)
+    if not report.healthy:
+        for c in report.fatal:
+            console.print(f"[red]FATAL[/red] {c.name}: {c.message}")
+        raise typer.Exit(1)
+
+    store = _get_store(config)
+    logger = _get_logger(config)
+
+    # Seed a WorkBead for this issue
+    bead_data = [{"number": issue, "title": issue_title}]
+    _seed_work_beads(store, bead_data, milestone_title or "unknown", None, repo)
+
+    # Try to find a spec file matching this milestone
+    spec_path: Path | None = None
+    if milestone_title:
+        for candidate in sorted(Path("specs").glob("*.md")):
+            try:
+                sp = parse_spec(candidate)
+                if sp.version == milestone_title:
+                    spec_path = candidate
+                    break
+            except Exception:
+                continue
+
+    if spec_path:
+        from breadforge.graph.builder import build_greenfield_graph
+        from breadforge.graph.executor import GraphExecutor, make_handlers
+
+        handlers = make_handlers(store=store, logger=logger)
+        executor = GraphExecutor(
+            config=config,
+            handlers=handlers,
+            store=store,
+            logger=logger,
+            concurrency=config.concurrency,
+            watchdog_interval=float(config.watchdog_interval_seconds),
+        )
+
+        import tempfile
+
+        repo_clone_dir = tempfile.mkdtemp(prefix="breadforge-clone-")
+        clone_result = subprocess.run(
+            ["gh", "repo", "clone", config.repo, repo_clone_dir, "--", "--depth=1"],
+            capture_output=True,
+            text=True,
+        )
+        repo_local_path = repo_clone_dir if clone_result.returncode == 0 else ""
+        if not repo_local_path:
+            console.print(
+                f"[yellow]warning:[/yellow] could not clone {config.repo} for codebase assessment"
+            )
+
+        async def _run_graph() -> None:
+            graph = build_greenfield_graph(
+                milestone=milestone_title,
+                spec_file=spec_path,
+                repo=config.repo,
+                repo_local_path=repo_local_path,
+                milestone_issue_number=issue,
+            )
+            result = await executor.run(graph)
+            console.print(
+                f"done={len(result.done)} failed={len(result.failed)} "
+                f"abandoned={len(result.abandoned)}"
+            )
+
+        asyncio.run(_run_graph())
+    else:
+        # Fallback: rolling dispatcher for issue-number-only dispatch
+        from breadforge.dispatch import RollingDispatcher
+
+        dispatcher = RollingDispatcher(config, store, logger)
+        asyncio.run(dispatcher.run([issue]))
+        console.print(f"[green]Done.[/green] Completed: {dispatcher.completed_count}")
+
+
 @app.command()
 def cost(
     repo: Annotated[str | None, typer.Option()] = None,
