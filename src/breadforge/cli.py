@@ -6,7 +6,10 @@ import asyncio
 import json
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
+
+if TYPE_CHECKING:
+    from rich.console import Group
 
 import typer
 from rich.console import Console
@@ -151,11 +154,17 @@ def _ensure_ci_auth(repo: str) -> None:
     encoded = base64.b64encode(patched.encode("utf-8")).decode("ascii")
     subprocess.run(
         [
-            "gh", "api", f"repos/{repo}/contents/.github/workflows/ci.yml",
-            "-X", "PUT",
-            "-f", "message=fix(ci): authenticate sibling dep clones with GITHUB_TOKEN",
-            "-f", f"content={encoded}",
-            "-f", f"sha={sha}",
+            "gh",
+            "api",
+            f"repos/{repo}/contents/.github/workflows/ci.yml",
+            "-X",
+            "PUT",
+            "-f",
+            "message=fix(ci): authenticate sibling dep clones with GITHUB_TOKEN",
+            "-f",
+            f"content={encoded}",
+            "-f",
+            f"sha={sha}",
         ],
         capture_output=True,
         text=True,
@@ -432,6 +441,7 @@ def run(
 
         # Clone the repo once for codebase assessment by the plan handler
         import tempfile
+
         repo_clone_dir = tempfile.mkdtemp(prefix="breadforge-clone-")
         clone_result = subprocess.run(
             ["gh", "repo", "clone", config.repo, repo_clone_dir, "--", "--depth=1"],
@@ -440,7 +450,9 @@ def run(
         )
         repo_local_path = repo_clone_dir if clone_result.returncode == 0 else ""
         if not repo_local_path:
-            console.print(f"[yellow]warning:[/yellow] could not clone {config.repo} for codebase assessment")
+            console.print(
+                f"[yellow]warning:[/yellow] could not clone {config.repo} for codebase assessment"
+            )
 
         async def _run_graph() -> None:
             for spec_path, ms, milestone_issue in _spec_paths:
@@ -631,7 +643,7 @@ def _build_status_table(
     store: BeadStore,
     repo: str,
     milestone: str | None,
-) -> "Group":
+) -> Group:
     from rich.console import Group
 
     tables = []
@@ -647,7 +659,7 @@ def _build_status_table(
     }
     bead_table = Table(
         title=f"Work Beads — {repo}" + (f" / {milestone}" if milestone else ""),
-        )
+    )
     bead_table.add_column("Issue", style="cyan", justify="right")
     bead_table.add_column("Title")
     bead_table.add_column("State")
@@ -978,6 +990,120 @@ def repo_list() -> None:
         )
 
     console.print(table)
+
+
+@app.command()
+def trigger(
+    repo: Annotated[str | None, typer.Option(help="owner/repo to operate on.")] = None,
+    issue_number: Annotated[int | None, typer.Option(help="Issue number from GHA event.")] = None,
+    concurrency: Annotated[int, typer.Option(help="Max parallel agents.")] = 3,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Dispatch breadforge from a GitHub Actions issues event.
+
+    Looks up the issue's milestone, finds the matching spec file, and runs
+    the graph executor for that milestone.
+    """
+    if issue_number is None:
+        console.print("[red]error:[/red] --issue-number is required")
+        raise typer.Exit(1)
+
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    config.concurrency = concurrency
+
+    store = _get_store(config)
+    logger = _get_logger(config)
+
+    # Look up issue to find milestone
+    r = subprocess.run(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            repo,
+            "--json",
+            "milestone,title,labels",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        console.print(f"[red]error:[/red] could not read issue #{issue_number}: {r.stderr.strip()}")
+        raise typer.Exit(1)
+
+    try:
+        issue_data = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        console.print("[red]error:[/red] could not parse issue data")
+        raise typer.Exit(1) from None
+
+    milestone_obj = issue_data.get("milestone") or {}
+    milestone_name = milestone_obj.get("title") if isinstance(milestone_obj, dict) else None
+    if not milestone_name:
+        console.print(
+            f"[yellow]warning:[/yellow] issue #{issue_number} has no milestone — nothing to dispatch"
+        )
+        return
+
+    # Find spec file for this milestone in specs/
+    spec_file: Path | None = None
+    spec_dir = Path("specs")
+    if spec_dir.exists():
+        for path in sorted(spec_dir.glob("*.md")):
+            try:
+                spec = parse_spec(path)
+                if str(spec.version) == milestone_name or f"v{spec.version}" == milestone_name:
+                    spec_file = path
+                    break
+            except Exception:
+                continue
+
+    if spec_file is None:
+        console.print(
+            f"[yellow]warning:[/yellow] no spec found for milestone {milestone_name!r} in {spec_dir}"
+        )
+        return
+
+    console.print(
+        f"Triggering graph for #{issue_number} → milestone {milestone_name} (spec: {spec_file})"
+    )
+
+    if dry_run:
+        console.print(
+            f"[yellow][dry-run][/yellow] would dispatch issue #{issue_number} via graph executor"
+        )
+        return
+
+    from breadforge.graph.builder import build_greenfield_graph
+    from breadforge.graph.executor import GraphExecutor, make_handlers
+
+    handlers = make_handlers(store=store, logger=logger)
+    executor = GraphExecutor(
+        config=config,
+        handlers=handlers,
+        store=store,
+        logger=logger,
+        concurrency=config.concurrency,
+        watchdog_interval=float(config.watchdog_interval_seconds),
+    )
+
+    graph = build_greenfield_graph(
+        milestone=milestone_name,
+        spec_file=spec_file,
+        repo=repo,
+        milestone_issue_number=issue_number,
+    )
+
+    async def _run() -> None:
+        result = await executor.run(graph)
+        console.print(
+            f"done={len(result.done)} failed={len(result.failed)} abandoned={len(result.abandoned)}"
+        )
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
