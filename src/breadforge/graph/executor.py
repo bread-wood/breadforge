@@ -304,7 +304,12 @@ class GraphExecutor:
             )
             return NodeResult(
                 success=True,
-                output={"dry_run": True, "module": module, "issue_number": issue_number, "files": files},
+                output={
+                    "dry_run": True,
+                    "module": module,
+                    "issue_number": issue_number,
+                    "files": files,
+                },
             )
         # merge, readme, design_doc, wait — skip without marking done in store
         self._log_info(f"[dry-run] skipping {node.type} node {node.id}")
@@ -369,14 +374,14 @@ class GraphExecutor:
                             node.output = recovery.output
                             node.state = "done"  # type: ignore[assignment]
                             exec_result.done.append(node.id)
-                            self._log_info(
-                                f"node {node.id} recovered on retry (PR already exists)"
-                            )
+                            self._log_info(f"node {node.id} recovered on retry (PR already exists)")
                             if self._store:
                                 self._store.write_node(node)
                             return
                     node.state = "pending"  # type: ignore[assignment]
-                    self._log_info(f"node {node.id} failed (attempt {node.retry_count}), re-queuing")
+                    self._log_info(
+                        f"node {node.id} failed (attempt {node.retry_count}), re-queuing"
+                    )
                 else:
                     node.state = "abandoned"  # type: ignore[assignment]
                     exec_result.abandoned.append(node.id)
