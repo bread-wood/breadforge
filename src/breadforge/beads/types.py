@@ -141,7 +141,9 @@ class CampaignBead(BaseModel):
 # GraphNode + PlanArtifact (new DAG execution types)
 # ---------------------------------------------------------------------------
 
-NodeType = Literal["research", "plan", "build", "merge", "readme"]
+NodeType = Literal[
+    "research", "plan", "build", "merge", "readme", "wait", "consensus", "design_doc"
+]
 NodeState = Literal["pending", "running", "done", "failed", "abandoned"]
 
 
