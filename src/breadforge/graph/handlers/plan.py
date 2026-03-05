@@ -65,9 +65,9 @@ def _read_codebase_summary(repo_local_path: str | None) -> str:
     )[:150]
 
     for py_file in py_files:
-        with contextlib.suppress(OSError):
+        try:
             text = py_file.read_text(encoding="utf-8")
-        else:
+        except OSError:
             continue
         rel = py_file.relative_to(root)
         classes = re.findall(r"^class (\w+)", text, re.MULTILINE)
