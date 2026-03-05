@@ -278,9 +278,11 @@ class GraphExecutor:
 
                 existing = self._store.read_work_bead(issue_number)
                 if not existing:
+                    title = node.context.get("issue_title") or f"impl: {module}"
                     bead = WorkBead(
                         issue_number=issue_number,
                         repo=self._config.repo,
+                        title=title,
                         state="open",  # type: ignore[arg-type]
                         node_id=node.id,
                     )
@@ -293,7 +295,7 @@ class GraphExecutor:
                 success=True,
                 output={"dry_run": True, "module": module, "issue_number": issue_number, "files": files},
             )
-        # merge, readme, design_doc, wait — skip silently
+        # merge, readme, design_doc, wait — skip without marking done in store
         self._log_info(f"[dry-run] skipping {node.type} node {node.id}")
         return NodeResult(success=True, output={"dry_run": True, "skipped": True})
 
@@ -310,6 +312,10 @@ class GraphExecutor:
         if result.success:
             node.state = "done"  # type: ignore[assignment]
             exec_result.done.append(node.id)
+            # Dry-run skipped nodes must not be persisted as done — a real run
+            # would then skip them via _restore_from_store and never execute them.
+            if result.output.get("skipped") and self._dry_run:
+                return
             self._log_info(f"node {node.id} done")
 
             # Plan nodes may emit new nodes
