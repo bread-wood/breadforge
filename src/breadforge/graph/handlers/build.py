@@ -315,10 +315,10 @@ class BuildHandler:
                 f"**`{module}` module done** — PR #{pr_number} opened on `{branch}`",
             )
 
-        return NodeResult(
-            success=True,
-            output={"pr_number": pr_number, "branch": branch, "model": model},
-        )
+        out: dict = {"pr_number": pr_number, "branch": branch, "model": model}
+        if result.cost_usd is not None:
+            out["cost_usd"] = result.cost_usd
+        return NodeResult(success=True, output=out)
 
     async def _assess(self, node: GraphNode, config: Config):
         from breadforge.beads.types import PlanArtifact

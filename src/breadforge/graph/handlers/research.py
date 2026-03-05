@@ -69,6 +69,7 @@ class ResearchHandler:
                     success=False,
                     error=f"research backend '{config.research_backend}' returned no content",
                 )
+            agent_cost = None
         else:
             # Default: restricted subprocess claude with WebSearch/WebFetch only.
             result = await run_agent(
@@ -83,6 +84,7 @@ class ResearchHandler:
                     error=f"research agent failed (exit {result.exit_code})",
                 )
             findings = result.stdout.strip()
+            agent_cost = result.cost_usd
 
         if self._store:
             self._store.store_research_findings(node.id, findings)
@@ -94,10 +96,10 @@ class ResearchHandler:
                 milestone=milestone,
             )
 
-        return NodeResult(
-            success=True,
-            output={"findings": findings, "node_id": node.id},
-        )
+        out: dict = {"findings": findings, "node_id": node.id}
+        if agent_cost is not None:
+            out["cost_usd"] = agent_cost
+        return NodeResult(success=True, output=out)
 
     async def _execute_via_backend(self, prompt: str, config: Config) -> str | None:
         """Call a non-anthropic backend directly and return the text content."""

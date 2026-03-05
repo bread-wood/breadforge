@@ -556,9 +556,12 @@ def run(
     if model:
         config.model = model
 
-    # Forward yeast-bot token as GH_TOKEN so agents authenticate as the service account
+    # All git ops (issue claims, PRs, comments, merges) run as yeast-bot.
+    # Always override GH_TOKEN — the bot token takes precedence over any
+    # ambient operator credentials so every gh CLI call in the orchestrator
+    # and in build agents authenticates as the service account.
     if config.github_token:
-        _os.environ.setdefault("GH_TOKEN", config.github_token)
+        _os.environ["GH_TOKEN"] = config.github_token
 
     # Health check
     report = run_health_checks(repo)
@@ -921,6 +924,17 @@ def _build_status_table(
                 str(node.retry_count) if node.retry_count else "",
             )
         tables.append(node_table)
+
+        # Estimated cost across all completed nodes
+        total_cost = sum(
+            (n.output or {}).get("cost_usd", 0.0)
+            for n in nodes
+            if n.state == "done" and (n.output or {}).get("cost_usd") is not None
+        )
+        if total_cost > 0:
+            from rich.text import Text
+
+            tables.append(Text(f"  Est. cost: ${total_cost:.4f}", style="dim"))
 
     return Group(*tables)
 

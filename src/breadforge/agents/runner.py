@@ -35,6 +35,17 @@ class RunResult:
                 return e
         return None
 
+    @property
+    def cost_usd(self) -> float | None:
+        """Estimated cost from the stream-json result event, or None if unavailable."""
+        result = self.find_event("result")
+        if result is None:
+            return None
+        cost = result.get("cost_usd")
+        if cost is not None:
+            return float(cost)
+        return None
+
 
 def _build_env(
     model: str,
