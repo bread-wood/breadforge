@@ -227,10 +227,9 @@ def parse_spec(path: Path) -> MilestoneSpec:
             if m:
                 modules.append(ModuleSpec(name=m.group(1).strip(), description=m.group(2).strip()))
 
-        elif current_section == "":
+        elif current_section == "" and line.strip():
             # Free text before any section — treat as overview
-            if line.strip():
-                free_lines.append(line.strip())
+            free_lines.append(line.strip())
 
     # If no explicit overview, use free text that appeared before any section
     if not overview_lines and free_lines:
