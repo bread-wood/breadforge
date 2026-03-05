@@ -1,0 +1,714 @@
+"""breadforge CLI."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from breadforge.beads import BeadStore
+from breadforge.config import Config, Registry, RepoEntry
+from breadforge.health import run_health_checks
+from breadforge.logger import Logger
+from breadforge.spec import parse_campaign, parse_spec
+
+app = typer.Typer(
+    name="breadforge",
+    help="Platform build orchestrator — spec-driven, bead-tracked, multi-repo.",
+    no_args_is_help=True,
+)
+console = Console()
+
+repo_app = typer.Typer(help="Manage platform repo registry.")
+app.add_typer(repo_app, name="repo")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _require_repo(repo: str | None) -> str:
+    if repo:
+        return repo
+    # Try to detect from git remote
+    r = subprocess.run(
+        ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+        capture_output=True,
+        text=True,
+        cwd=Path.cwd(),
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip()
+    console.print("[red]error:[/red] --repo is required (or run from inside a git repo)")
+    raise typer.Exit(1)
+
+
+def _get_store(config: Config) -> BeadStore:
+    return BeadStore(config.beads_dir, config.repo)
+
+
+def _get_logger(config: Config, run_id: str | None = None) -> Logger:
+    log_dir = config.beads_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return Logger(log_dir / f"{config.repo.replace('/', '_')}.jsonl", run_id=run_id)
+
+
+def _get_open_issues_for_milestone(repo: str, milestone: str) -> list[dict]:
+    r = subprocess.run(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--milestone",
+            milestone,
+            "--state",
+            "open",
+            "--json",
+            "number,title,labels",
+            "--limit",
+            "200",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return []
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return []
+
+
+def _file_issue(repo: str, title: str, body: str, milestone: str, labels: list[str]) -> int | None:
+    cmd = [
+        "gh",
+        "issue",
+        "create",
+        "--repo",
+        repo,
+        "--title",
+        title,
+        "--body",
+        body,
+        "--milestone",
+        milestone,
+    ]
+    for label in labels:
+        cmd += ["--label", label]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    # Parse issue number from URL
+    url = r.stdout.strip()
+    try:
+        return int(url.rstrip("/").split("/")[-1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _ensure_milestone(repo: str, milestone: str) -> bool:
+    # Check if it exists
+    r = subprocess.run(
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/milestones",
+            "--jq",
+            f'[.[] | select(.title=="{milestone}")] | length',
+        ],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        count = int(r.stdout.strip())
+        if count > 0:
+            return True
+    except (ValueError, TypeError):
+        pass
+    # Create it
+    r = subprocess.run(
+        ["gh", "api", f"repos/{repo}/milestones", "--method", "POST", "-f", f"title={milestone}"],
+        capture_output=True,
+        text=True,
+    )
+    return r.returncode == 0
+
+
+def _seed_work_beads(
+    store: BeadStore,
+    issues: list[dict],
+    milestone: str,
+    spec_file: str | None = None,
+    repo: str = "",
+) -> list[int]:
+    """Create WorkBeads for issues that don't already have one. Returns new issue numbers."""
+    from breadforge.beads import WorkBead
+
+    new_numbers = []
+    for issue in issues:
+        n = issue["number"]
+        if store.read_work_bead(n) is not None:
+            continue
+        bead = WorkBead(
+            issue_number=n,
+            repo=repo,
+            title=issue["title"],
+            milestone=milestone,
+            spec_file=spec_file,
+        )
+        store.write_work_bead(bead)
+        new_numbers.append(n)
+    return new_numbers
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def run(
+    specs: Annotated[list[Path], typer.Argument(help="Spec markdown file(s) to run.")],
+    repo: Annotated[str | None, typer.Option(help="owner/repo to operate on.")] = None,
+    concurrency: Annotated[int, typer.Option(help="Max parallel agents.")] = 3,
+    model: Annotated[str | None, typer.Option(help="Override model for all agents.")] = None,
+    milestone: Annotated[str | None, typer.Option(help="GitHub milestone name.")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Parse spec(s), file GitHub issues, and dispatch agents."""
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    if concurrency:
+        config.concurrency = concurrency
+    if model:
+        config.model = model
+
+    # Health check
+    report = run_health_checks(repo)
+    if not report.healthy:
+        for c in report.fatal:
+            console.print(f"[red]FATAL[/red] {c.name}: {c.message}")
+        raise typer.Exit(1)
+
+    store = _get_store(config)
+    logger = _get_logger(config)
+
+    all_issue_numbers: list[int] = []
+
+    for spec_path in specs:
+        if not spec_path.exists():
+            console.print(f"[red]error:[/red] spec file not found: {spec_path}")
+            raise typer.Exit(1)
+
+        # Handle campaign files
+        if spec_path.name == "campaign.md" or (
+            spec_path.suffix == ".md" and "campaign" in spec_path.stem
+        ):
+            sub_specs = parse_campaign(spec_path)
+            if not sub_specs:
+                console.print(f"[yellow]warning:[/yellow] no specs found in campaign {spec_path}")
+                continue
+            for sub_path in sub_specs:
+                if sub_path.exists():
+                    issue_numbers = _run_single_spec(
+                        sub_path, repo, config, store, logger, milestone, dry_run
+                    )
+                    all_issue_numbers.extend(issue_numbers)
+        else:
+            issue_numbers = _run_single_spec(
+                spec_path, repo, config, store, logger, milestone, dry_run
+            )
+            all_issue_numbers.extend(issue_numbers)
+
+    if not all_issue_numbers:
+        console.print("No issues to dispatch.")
+        return
+
+    console.print(
+        f"\nDispatching {len(all_issue_numbers)} issue(s) with concurrency={config.concurrency}..."
+    )
+
+    if dry_run:
+        console.print("[yellow][dry-run][/yellow] would dispatch:", all_issue_numbers)
+        return
+
+    from breadforge.dispatch import RollingDispatcher
+    from breadforge.merge import process_merge_queue
+
+    dispatcher = RollingDispatcher(config, store, logger)
+
+    async def _run() -> None:
+        dispatch_task = asyncio.create_task(dispatcher.run(all_issue_numbers))
+
+        heartbeat_interval = config.watchdog_interval_seconds
+
+        async def _heartbeat() -> None:
+            while not dispatch_task.done():
+                await asyncio.sleep(heartbeat_interval)
+                queue = store.read_merge_queue()
+                logger.heartbeat(
+                    active_agents=dispatcher.active_count,
+                    queue_depth=len(queue.items),
+                    completed=dispatcher.completed_count,
+                    cost_usd=0.0,  # TODO: wire breadmin-llm cost tracking
+                )
+                # Drain merge queue
+                merged = process_merge_queue(store, config, logger=logger)
+                if merged:
+                    console.print(f"  merged {merged} PR(s)")
+
+        await asyncio.gather(dispatch_task, _heartbeat())
+
+        # Final merge drain
+        process_merge_queue(store, config, logger=logger)
+
+    asyncio.run(_run())
+    console.print(f"\n[green]Done.[/green] Completed: {dispatcher.completed_count}")
+
+
+def _run_single_spec(
+    spec_path: Path,
+    repo: str,
+    config: Config,
+    store: BeadStore,
+    logger: Logger,
+    milestone_override: str | None,
+    dry_run: bool,
+) -> list[int]:
+    spec = parse_spec(spec_path)
+    ms = milestone_override or f"{spec.version}"
+
+    console.print(f"\n[bold]{spec.title}[/bold] → milestone: {ms}")
+
+    # Ensure milestone exists
+    if not dry_run and not _ensure_milestone(repo, ms):
+        console.print(f"[red]error:[/red] could not create milestone {ms}")
+        return []
+
+    # Build issue body from spec
+    body = f"{spec.overview}\n\n"
+    if spec.success_criteria:
+        body += "## Success Criteria\n"
+        for c in spec.success_criteria:
+            body += f"- [ ] {c}\n"
+    body += f"\n_Spec: `{spec_path.name}`_"
+
+    # File one impl issue (agents reason about decomposition themselves)
+    existing = _get_open_issues_for_milestone(repo, ms) if not dry_run else []
+    impl_issues = [i for i in existing if "stage/impl" in str(i.get("labels", []))]
+
+    issue_numbers: list[int] = []
+
+    if not impl_issues:
+        if dry_run:
+            console.print(f"  [dry-run] would file impl issue: {spec.issue_title}")
+            return [-1]  # sentinel
+
+        issue_number = _file_issue(
+            repo,
+            title=spec.issue_title,
+            body=body,
+            milestone=ms,
+            labels=["stage/impl", "P2"],
+        )
+        if issue_number:
+            console.print(f"  filed issue #{issue_number}: {spec.issue_title}")
+            issue_numbers.append(issue_number)
+    else:
+        issue_numbers = [i["number"] for i in impl_issues]
+        console.print(f"  using existing issues: {issue_numbers}")
+
+    # Seed WorkBeads
+    issues_data = [{"number": n, "title": spec.issue_title} for n in issue_numbers]
+    new_beads = _seed_work_beads(store, issues_data, ms, str(spec_path), repo)
+    if new_beads:
+        console.print(f"  seeded {len(new_beads)} work bead(s)")
+
+    logger.info(f"spec {spec_path.name} → {len(issue_numbers)} issue(s)", milestone=ms)
+    return issue_numbers
+
+
+@app.command()
+def plan(
+    specs: Annotated[list[Path], typer.Argument(help="Spec file(s) to plan (no dispatch).")],
+    repo: Annotated[str | None, typer.Option()] = None,
+    milestone_prefix: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """File GitHub issues for specs without dispatching agents.
+
+    Seeds WorkBeads and records campaign ordering.
+    """
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    store = _get_store(config)
+    logger = _get_logger(config)
+
+    from breadforge.beads import CampaignBead, MilestonePlan
+
+    _ = logger  # reserved for future use
+    campaign = store.read_campaign_bead() or CampaignBead(repo=repo)
+    total_filed = 0
+
+    for i, spec_path in enumerate(specs):
+        if not spec_path.exists():
+            console.print(f"[red]error:[/red] spec not found: {spec_path}")
+            raise typer.Exit(1)
+        spec = parse_spec(spec_path)
+        ms = f"{spec.version}"
+
+        # Check ordering (basic semver guard)
+        if i > 0 and campaign.milestones:
+            pass  # TODO: full semver ordering validation
+
+        console.print(f"Planning {spec.title} → {ms}")
+        _ensure_milestone(repo, ms)
+
+        # File impl issue
+        body = f"{spec.overview}\n\n_Spec: `{spec_path.name}`_"
+        issue_number = _file_issue(
+            repo,
+            title=spec.issue_title,
+            body=body,
+            milestone=ms,
+            labels=["stage/impl", "P2"],
+        )
+        if issue_number:
+            console.print(f"  filed #{issue_number}")
+            total_filed += 1
+            bead_data = [{"number": issue_number, "title": spec.issue_title}]
+            _seed_work_beads(store, bead_data, ms, str(spec_path), repo)
+
+        # Record in campaign
+        if not campaign.get_milestone(ms, repo):
+            plan_entry = MilestonePlan(milestone=ms, repo=repo, spec_file=str(spec_path))
+            campaign.milestones.append(plan_entry)
+
+    store.write_campaign_bead(campaign)
+    console.print(f"\nPlanned {total_filed} issue(s). Campaign updated.")
+
+
+@app.command()
+def init(
+    milestone: Annotated[str, typer.Option(help="Milestone name to create.")],
+    repo: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Create a GitHub milestone (no issue seeding)."""
+    repo = _require_repo(repo)
+    if _ensure_milestone(repo, milestone):
+        console.print(f"[green]ok[/green] milestone '{milestone}' exists in {repo}")
+    else:
+        console.print(f"[red]error:[/red] could not create milestone '{milestone}'")
+        raise typer.Exit(1)
+
+
+@app.command()
+def status(
+    repo: Annotated[str | None, typer.Option()] = None,
+    milestone: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Show live bead state table."""
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    store = _get_store(config)
+
+    beads = store.list_work_beads(milestone=milestone)
+
+    if not beads:
+        console.print("No work beads found.")
+        return
+
+    # Campaign summary
+    campaign = store.read_campaign_bead()
+    if campaign and campaign.milestones:
+        console.print(f"\n[bold]Campaign[/bold] ({len(campaign.milestones)} milestones)")
+        for m in campaign.milestones:
+            status_color = {
+                "shipped": "green",
+                "implementing": "yellow",
+                "blocked": "red",
+                "failed": "red",
+                "pending": "dim",
+            }.get(m.status, "white")
+            console.print(f"  [{status_color}]{m.status:15}[/{status_color}] {m.milestone}")
+
+    # Work beads table
+    table = Table(title=f"Work Beads — {repo}" + (f" / {milestone}" if milestone else ""))
+    table.add_column("Issue", style="cyan", justify="right")
+    table.add_column("Title")
+    table.add_column("State")
+    table.add_column("Retries", justify="right")
+    table.add_column("Branch")
+    table.add_column("PR", justify="right")
+
+    state_colors = {
+        "open": "dim",
+        "claimed": "yellow",
+        "pr_open": "blue",
+        "merge_ready": "green",
+        "closed": "green",
+        "abandoned": "red",
+    }
+
+    for bead in sorted(beads, key=lambda b: b.issue_number):
+        color = state_colors.get(bead.state, "white")
+        table.add_row(
+            str(bead.issue_number),
+            bead.title[:50],
+            f"[{color}]{bead.state}[/{color}]",
+            str(bead.retry_count) if bead.retry_count else "",
+            bead.branch or "",
+            str(bead.pr_number) if bead.pr_number else "",
+        )
+
+    console.print(table)
+
+    # Active agents (slots in dispatch)
+    queue = store.read_merge_queue()
+    if queue.items:
+        console.print(f"\nMerge queue: {len(queue.items)} item(s)")
+        for item in queue.items:
+            console.print(
+                f"  PR #{item.pr_number} (issue #{item.issue_number}, branch: {item.branch})"
+            )
+
+
+@app.command(name="beads")
+def beads_cmd(
+    repo: Annotated[str | None, typer.Option()] = None,
+    state: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Show all beads for a repo."""
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    store = _get_store(config)
+
+    work_beads = store.list_work_beads(state=state)  # type: ignore
+    pr_beads = store.list_pr_beads()
+
+    console.print(f"\n[bold]Work Beads[/bold] ({len(work_beads)})")
+    for b in sorted(work_beads, key=lambda x: x.issue_number):
+        console.print(f"  #{b.issue_number:4}  {b.state:15}  {b.title[:50]}")
+
+    console.print(f"\n[bold]PR Beads[/bold] ({len(pr_beads)})")
+    for b in sorted(pr_beads, key=lambda x: x.pr_number):
+        console.print(f"  PR #{b.pr_number:4}  {b.state:15}  issue #{b.issue_number}")
+
+
+@app.command()
+def health(
+    repo: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Run preflight health checks."""
+    repo = _require_repo(repo)
+    report = run_health_checks(repo)
+
+    table = Table(title="Health Checks")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Message")
+
+    for check in report.checks:
+        color = {"pass": "green", "fail": "red", "warn": "yellow"}[check.status]
+        table.add_row(check.name, f"[{color}]{check.status.upper()}[/{color}]", check.message)
+
+    console.print(table)
+
+    if not report.healthy:
+        raise typer.Exit(1)
+
+
+@app.command()
+def monitor(
+    repo: Annotated[str | None, typer.Option()] = None,
+    once: Annotated[bool, typer.Option("--once")] = False,
+    interval: Annotated[int, typer.Option(help="Scan interval in seconds.")] = 300,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Run the anomaly monitor loop."""
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    store = _get_store(config)
+    logger = _get_logger(config)
+
+    from breadforge.monitor import run_monitor
+
+    console.print(f"Starting monitor for {repo} (interval={interval}s, once={once})")
+    asyncio.run(
+        run_monitor(
+            store,
+            config,
+            logger,
+            once=once,
+            interval_seconds=interval,
+            dry_run=dry_run,
+        )
+    )
+
+
+@app.command(name="spec")
+def spec_cmd(
+    description: Annotated[str | None, typer.Argument(help="Feature description.")] = None,
+    file: Annotated[Path | None, typer.Option("--file", help="Read description from file.")] = None,
+    repo: Annotated[str | None, typer.Option()] = None,
+    output_dir: Annotated[Path | None, typer.Option()] = None,
+    non_interactive: Annotated[bool, typer.Option("--non-interactive")] = False,
+) -> None:
+    """Interactive spec-forge: draft a milestone spec from a description."""
+    registry = Registry()
+
+    from breadforge.forge import spec_forge
+
+    written = asyncio.run(
+        spec_forge(
+            description=description,
+            file=file,
+            registry=registry,
+            interactive=not non_interactive,
+            output_dir=output_dir or Path.cwd(),
+        )
+    )
+
+    for path in written:
+        console.print(f"[green]wrote:[/green] {path}")
+
+
+@app.command()
+def cost(
+    repo: Annotated[str | None, typer.Option()] = None,
+    period: Annotated[str, typer.Option(help="today|week|month|all")] = "all",
+) -> None:
+    """Show LLM cost summary via breadmin-llm."""
+    try:
+        from breadmin_llm.queries import query_costs
+    except ImportError as e:
+        console.print(
+            "[yellow]breadmin-llm not installed — install with: pip install breadforge[llm][/yellow]"
+        )
+        raise typer.Exit(1) from e
+
+    import os
+    from pathlib import Path
+
+    db_path = Path(os.environ.get("BREADMIN_DB_PATH", "data/breadmin.db"))
+    if not db_path.exists():
+        console.print(f"No cost database found at {db_path}")
+        return
+
+    results = query_costs(db_path, period=period, caller_prefix="breadforge")
+    if not results:
+        console.print("No cost records found.")
+        return
+
+    table = Table(title=f"LLM Costs ({period})")
+    table.add_column("Provider")
+    table.add_column("Model")
+    table.add_column("Calls", justify="right")
+    table.add_column("Tokens", justify="right")
+    table.add_column("Cost (USD)", justify="right")
+
+    for row in results:
+        table.add_row(
+            row.get("provider", ""),
+            row.get("model", ""),
+            str(row.get("call_count", "")),
+            str(row.get("total_tokens", "")),
+            f"${row.get('total_cost', 0):.4f}",
+        )
+
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Repo subcommands
+# ---------------------------------------------------------------------------
+
+
+@repo_app.command("add")
+def repo_add(
+    repo_name: Annotated[str, typer.Argument(help="owner/repo")],
+    local_path: Annotated[Path, typer.Option(help="Local clone path.")],
+    spec_dir: Annotated[Path | None, typer.Option(help="Spec directory within repo.")] = None,
+    default_branch: Annotated[str, typer.Option()] = "mainline",
+) -> None:
+    """Register a repo in the platform registry."""
+    registry = Registry()
+    entry = RepoEntry(
+        repo=repo_name,
+        local_path=local_path.expanduser().resolve(),
+        spec_dir=(spec_dir or local_path / "specs").expanduser().resolve(),
+        default_branch=default_branch,
+    )
+    registry.add(entry)
+    console.print(f"[green]Registered[/green] {repo_name}")
+
+    # Add yeast-bot as collaborator
+    r = subprocess.run(
+        [
+            "gh",
+            "api",
+            f"repos/{repo_name}/collaborators/yeast-bot",
+            "--method",
+            "PUT",
+            "-f",
+            "permission=push",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode == 0:
+        console.print("  yeast-bot added as collaborator")
+    else:
+        console.print(f"  [yellow]warning:[/yellow] could not add yeast-bot: {r.stderr.strip()}")
+
+
+@repo_app.command("remove")
+def repo_remove(
+    repo_name: Annotated[str, typer.Argument()],
+) -> None:
+    """Remove a repo from the registry."""
+    registry = Registry()
+    if registry.remove(repo_name):
+        console.print(f"[green]Removed[/green] {repo_name}")
+    else:
+        console.print(f"[yellow]Not found:[/yellow] {repo_name}")
+
+
+@repo_app.command("list")
+def repo_list() -> None:
+    """List all registered repos."""
+    registry = Registry()
+    repos = registry.list()
+    if not repos:
+        console.print(
+            "No repos registered. Use: breadforge repo add <owner/repo> --local-path <path>"
+        )
+        return
+
+    table = Table(title="Platform Repo Registry")
+    table.add_column("Repo")
+    table.add_column("Local Path")
+    table.add_column("Spec Dir")
+    table.add_column("Branch")
+
+    for entry in repos:
+        table.add_row(
+            entry.repo,
+            str(entry.local_path),
+            str(entry.spec_dir),
+            entry.default_branch,
+        )
+
+    console.print(table)
+
+
+if __name__ == "__main__":
+    app()
