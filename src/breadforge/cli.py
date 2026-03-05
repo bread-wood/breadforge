@@ -770,12 +770,16 @@ def _build_status_table(
         node_table.add_column("Retries", justify="right")
         for node in sorted(nodes, key=lambda n: n.id):
             color = node_colors.get(node.state, "white")
-            node_model = (node.output or {}).get("model") or node.assigned_model or ""
+            if node.type == "merge":
+                node_model_display = "[dim]N/A[/dim]"
+            else:
+                node_model = (node.output or {}).get("model") or node.assigned_model or ""
+                node_model_display = _model_tier(node_model)
             node_table.add_row(
                 node.id,
                 node.type,
                 f"[{color}]{node.state}[/{color}]",
-                _model_tier(node_model),
+                node_model_display,
                 str(node.retry_count) if node.retry_count else "",
             )
         tables.append(node_table)
