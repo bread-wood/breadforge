@@ -8,6 +8,9 @@ Core entry points:
 Cross-repo blocking:
   apply_cross_repo_blocking    — inject wait nodes for milestones that depend on
                                  other repos/milestones via CampaignBead.blocked_by.
+  build_graph_with_blocking    — wraps the above, inserting wait nodes for any
+                                 upstream milestones listed in CampaignBead.blocked_by
+                                 that have not yet shipped.
 
 Consensus/design-doc helpers:
   emit_consensus_node          — emit a consensus node that votes over proposals
@@ -16,10 +19,11 @@ Consensus/design-doc helpers:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from breadforge.beads.types import GraphNode
+from breadforge.beads.types import CampaignBead, GraphNode
 from breadforge.graph.executor import ExecutionGraph
 from breadforge.graph.node import make_node
 
@@ -177,6 +181,124 @@ def apply_cross_repo_blocking(
                 node.depends_on.append(wid)
 
     return graph
+
+
+# ---------------------------------------------------------------------------
+# Cross-repo blocking support (campaign-aware wrapper)
+# ---------------------------------------------------------------------------
+
+_GraphType = Literal["greenfield", "feature", "bug"]
+
+
+def build_graph_with_blocking(
+    milestone: str,
+    spec_file: str | Path,
+    repo: str,
+    campaign: CampaignBead,
+    repo_local_path: str | None = None,
+    milestone_issue_number: int | None = None,
+    graph_type: _GraphType = "greenfield",
+    bug_description: str | None = None,
+) -> ExecutionGraph:
+    """Build an execution graph that respects cross-repo blocking deps.
+
+    Checks CampaignBead for any upstream milestones that must ship before
+    ``milestone`` can begin.  For each unshipped blocker, a ``wait`` node is
+    prepended to the graph and the plan node is made to depend on it.
+
+    Args:
+        milestone: The milestone slug being built.
+        spec_file: Path to the spec file.
+        repo: ``owner/repo`` string.
+        campaign: CampaignBead that carries ``blocked_by`` metadata.
+        repo_local_path: Local checkout path (greenfield / bug only).
+        milestone_issue_number: GitHub issue number for progress comments.
+        graph_type: One of ``"greenfield"``, ``"feature"``, ``"bug"``.
+        bug_description: Required when ``graph_type="bug"``.
+
+    Returns:
+        An :class:`ExecutionGraph` with wait nodes prepended for any
+        unshipped upstream milestones.
+    """
+    # Build the base graph for this milestone type
+    if graph_type == "bug":
+        if not bug_description:
+            raise ValueError("bug_description is required when graph_type='bug'")
+        base = build_bug_graph(milestone, spec_file, repo, bug_description, repo_local_path)
+    elif graph_type == "feature":
+        base = build_feature_graph(milestone, spec_file, repo, repo_local_path)
+    else:
+        base = build_greenfield_graph(
+            milestone, spec_file, repo, repo_local_path, milestone_issue_number
+        )
+
+    # Find unshipped upstream milestones
+    unshipped = _unshipped_blockers(campaign, milestone, repo)
+    if not unshipped:
+        return base
+
+    # Create one wait node per unshipped blocker
+    wait_nodes = [_make_blocker_wait_node(blocker, milestone) for blocker in unshipped]
+    wait_ids = [n.id for n in wait_nodes]
+
+    # Patch the plan node (and any root research node) to depend on wait nodes
+    for node in base.all_nodes():
+        if node.type in ("plan", "research") and not node.depends_on:
+            node.depends_on = list(node.depends_on) + wait_ids
+
+    base.add_nodes(wait_nodes)
+    return base
+
+
+def _unshipped_blockers(
+    campaign: CampaignBead,
+    milestone: str,
+    repo: str | None = None,
+) -> list[str]:
+    """Return 'owner/repo:milestone' blockers that are not yet shipped."""
+    plan = campaign.get_milestone(milestone, repo)
+    if plan is None:
+        return []
+
+    unshipped = []
+    for blocker in plan.blocked_by:
+        if _is_blocker_unshipped(blocker, campaign):
+            unshipped.append(blocker)
+    return unshipped
+
+
+def _is_blocker_unshipped(blocker: str, campaign: CampaignBead) -> bool:
+    """Return True if the blocking milestone has not yet shipped."""
+    if ":" not in blocker:
+        return True  # malformed — treat as blocking
+    repo_part, milestone_part = blocker.rsplit(":", 1)
+    upstream = campaign.get_milestone(milestone_part, repo_part)
+    if upstream is None:
+        return True  # unknown upstream — treat as blocking
+    return upstream.status != "shipped"
+
+
+def _make_blocker_wait_node(blocker: str, milestone: str) -> GraphNode:
+    """Return a wait GraphNode for a cross-repo blocking dep.
+
+    Uses ``model_construct`` to bypass the NodeType Literal check since
+    ``"wait"`` is not in the standard NodeType enumeration.
+    """
+    safe = blocker.replace("/", "-").replace(":", "-")
+    return GraphNode.model_construct(
+        id=f"{milestone}-wait-blocker-{safe}",
+        type="wait",
+        state="pending",
+        depends_on=[],
+        context={"condition": "always_true", "blocker": blocker},
+        output=None,
+        assigned_model=None,
+        retry_count=0,
+        max_retries=3,
+        created_at=datetime.now(UTC),
+        started_at=None,
+        completed_at=None,
+    )
 
 
 # ---------------------------------------------------------------------------
