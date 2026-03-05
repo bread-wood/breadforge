@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from breadforge.graph.executor import ExecutionGraph
 
 import typer
-from rich.console import Console
+from rich.console import Console, Group
 from rich.table import Table
 
 from breadforge.beads import BeadStore
@@ -154,11 +154,17 @@ def _ensure_ci_auth(repo: str) -> None:
     encoded = base64.b64encode(patched.encode("utf-8")).decode("ascii")
     subprocess.run(
         [
-            "gh", "api", f"repos/{repo}/contents/.github/workflows/ci.yml",
-            "-X", "PUT",
-            "-f", "message=fix(ci): authenticate sibling dep clones with GITHUB_TOKEN",
-            "-f", f"content={encoded}",
-            "-f", f"sha={sha}",
+            "gh",
+            "api",
+            f"repos/{repo}/contents/.github/workflows/ci.yml",
+            "-X",
+            "PUT",
+            "-f",
+            "message=fix(ci): authenticate sibling dep clones with GITHUB_TOKEN",
+            "-f",
+            f"content={encoded}",
+            "-f",
+            f"sha={sha}",
         ],
         capture_output=True,
         text=True,
@@ -489,6 +495,7 @@ def run(
 
         # Clone the repo once for codebase assessment by the plan handler
         import tempfile
+
         repo_clone_dir = tempfile.mkdtemp(prefix="breadforge-clone-")
         clone_result = subprocess.run(
             ["gh", "repo", "clone", config.repo, repo_clone_dir, "--", "--depth=1"],
@@ -497,7 +504,9 @@ def run(
         )
         repo_local_path = repo_clone_dir if clone_result.returncode == 0 else ""
         if not repo_local_path:
-            console.print(f"[yellow]warning:[/yellow] could not clone {config.repo} for codebase assessment")
+            console.print(
+                f"[yellow]warning:[/yellow] could not clone {config.repo} for codebase assessment"
+            )
 
         async def _run_graph() -> None:
             for spec_path, ms, milestone_issue in _spec_paths:
@@ -509,7 +518,9 @@ def run(
                     milestone_issue_number=milestone_issue,
                 )
                 if dry_run:
-                    console.print(f"  [yellow][dry-run][/yellow] planning {ms} (research + plan LLMs will run)...")
+                    console.print(
+                        f"  [yellow][dry-run][/yellow] planning {ms} (research + plan LLMs will run)..."
+                    )
                 else:
                     console.print(f"  executing graph for {ms}...")
                 result = await executor.run(graph)
@@ -694,8 +705,7 @@ def _build_status_table(
     store: BeadStore,
     repo: str,
     milestone: str | None,
-) -> "Group":
-    from rich.console import Group
+) -> Group:
 
     tables = []
 
@@ -710,19 +720,22 @@ def _build_status_table(
     }
     bead_table = Table(
         title=f"Work Beads — {repo}" + (f" / {milestone}" if milestone else ""),
-        )
+    )
     bead_table.add_column("Issue", style="cyan", justify="right")
     bead_table.add_column("Title")
     bead_table.add_column("State")
+    bead_table.add_column("Model")
     bead_table.add_column("Retries", justify="right")
     bead_table.add_column("Branch")
     bead_table.add_column("PR", justify="right")
     for bead in sorted(beads, key=lambda b: b.issue_number):
         color = bead_colors.get(bead.state, "white")
+        model_short = (bead.model or "").replace("claude-", "").replace("-20251001", "")
         bead_table.add_row(
             str(bead.issue_number),
             bead.title[:50],
             f"[{color}]{bead.state}[/{color}]",
+            model_short,
             str(bead.retry_count) if bead.retry_count else "",
             bead.branch or "",
             str(bead.pr_number) if bead.pr_number else "",
@@ -742,13 +755,17 @@ def _build_status_table(
         node_table.add_column("Node ID")
         node_table.add_column("Type")
         node_table.add_column("State")
+        node_table.add_column("Model")
         node_table.add_column("Retries", justify="right")
         for node in sorted(nodes, key=lambda n: n.id):
             color = node_colors.get(node.state, "white")
+            node_model = (node.output or {}).get("model") or node.assigned_model or ""
+            node_model_short = node_model.replace("claude-", "").replace("-20251001", "")
             node_table.add_row(
                 node.id,
                 node.type,
                 f"[{color}]{node.state}[/{color}]",
+                node_model_short,
                 str(node.retry_count) if node.retry_count else "",
             )
         tables.append(node_table)
@@ -929,9 +946,14 @@ def run_issue(
     # Fetch issue metadata
     r = subprocess.run(
         [
-            "gh", "issue", "view", str(issue),
-            "--repo", repo,
-            "--json", "title,milestone,labels",
+            "gh",
+            "issue",
+            "view",
+            str(issue),
+            "--repo",
+            repo,
+            "--json",
+            "title,milestone,labels",
         ],
         capture_output=True,
         text=True,
@@ -1241,7 +1263,9 @@ def gha_dispatch(
     store = _get_store(config)
     logger = _get_logger(config)
 
-    issue_numbers = _run_single_spec(spec_file, repo, config, store, logger, milestone, dry_run=False)
+    issue_numbers = _run_single_spec(
+        spec_file, repo, config, store, logger, milestone, dry_run=False
+    )
 
     if not issue_numbers:
         console.print("No issues to dispatch.")

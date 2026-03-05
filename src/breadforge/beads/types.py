@@ -35,6 +35,8 @@ class WorkBead(BaseModel):
     spec_file: str | None = None
     node_id: str | None = None
     """GraphNode id that produced this work item, if dispatched via DAG executor."""
+    model: str | None = None
+    """Model selected by the assessor for the build agent."""
 
     def touch(self) -> None:
         self.updated_at = datetime.now(UTC)

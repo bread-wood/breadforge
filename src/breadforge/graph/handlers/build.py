@@ -91,7 +91,9 @@ fi
 """
 
 
-def _setup_workspace(workspace: Path, repo: str, branch: str, allowed_files: list[str]) -> str | None:
+def _setup_workspace(
+    workspace: Path, repo: str, branch: str, allowed_files: list[str]
+) -> str | None:
     """Clone repo, create branch, install scope-enforcement pre-commit hook.
 
     Returns an error string on failure, None on success.
@@ -178,6 +180,7 @@ class BuildHandler:
                 bead.branch = branch
                 bead.state = "claimed"  # type: ignore[assignment]
                 bead.node_id = node.id
+                bead.model = model
                 self._store.write_work_bead(bead)
             _claim_issue(repo, issue_number)
 
@@ -346,11 +349,16 @@ class BuildHandler:
                 )
             return NodeResult(
                 success=True,
-                output={"pr_number": pr_number, "branch": branch, "model": node.assigned_model or config.model},
+                output={
+                    "pr_number": pr_number,
+                    "branch": branch,
+                    "model": node.assigned_model or config.model,
+                },
             )
         return None  # no PR found — re-dispatch
 
     def _make_branch(self, node_id: str, module: str) -> str:
         import re
+
         slug = re.sub(r"[^a-zA-Z0-9._-]", "-", (module or node_id).lower())[:40].strip("-")
         return f"graph-{slug}"
