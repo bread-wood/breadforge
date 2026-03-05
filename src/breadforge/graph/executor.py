@@ -124,6 +124,12 @@ class ExecutionResult:
 class GraphExecutor:
     """Async DAG executor."""
 
+    # Node types that represent work dispatch — skipped in dry-run mode.
+    # Plan and research nodes always run (they produce the plan and beads).
+    _DRY_RUN_SKIP_TYPES: frozenset[str] = frozenset(
+        {"build", "merge", "readme", "design_doc", "wait"}
+    )
+
     def __init__(
         self,
         config: Config,
@@ -132,6 +138,7 @@ class GraphExecutor:
         logger: Logger | None = None,
         concurrency: int = 3,
         watchdog_interval: float = 60.0,
+        dry_run: bool = False,
     ) -> None:
         self._config = config
         self._handlers = handlers
@@ -139,6 +146,7 @@ class GraphExecutor:
         self._logger = logger
         self._concurrency = concurrency
         self._watchdog_interval = watchdog_interval
+        self._dry_run = dry_run
 
     def _restore_from_store(self, graph: ExecutionGraph, result: ExecutionResult) -> None:
         """Restore terminal node states and replay plan node expansions.
@@ -249,6 +257,8 @@ class GraphExecutor:
         return result
 
     async def _dispatch(self, node: GraphNode) -> NodeResult:
+        if self._dry_run and node.type in self._DRY_RUN_SKIP_TYPES:
+            return await self._dry_run_dispatch(node)
         handler = self._handlers.get(node.type)
         if handler is None:
             return NodeResult(success=False, error=f"no handler for type {node.type!r}")
@@ -256,6 +266,36 @@ class GraphExecutor:
             return await handler.execute(node, self._config)
         except Exception as e:
             return NodeResult(success=False, error=str(e))
+
+    async def _dry_run_dispatch(self, node: GraphNode) -> NodeResult:
+        """Dry-run: skip build/merge/readme dispatch; create WorkBeads for build nodes."""
+        if node.type == "build":
+            issue_number: int | None = node.context.get("issue_number")
+            module: str = node.context.get("module", node.id)
+            files: list[str] = node.context.get("files", [])
+            if issue_number and self._store:
+                from breadforge.beads.types import WorkBead
+
+                existing = self._store.read_work_bead(issue_number)
+                if not existing:
+                    bead = WorkBead(
+                        issue_number=issue_number,
+                        repo=self._config.repo,
+                        state="open",  # type: ignore[arg-type]
+                        node_id=node.id,
+                    )
+                    self._store.write_work_bead(bead)
+            self._log_info(
+                f"[dry-run] build node {node.id}: module={module!r} files={files} "
+                f"issue={issue_number} — WorkBead created, agent not dispatched"
+            )
+            return NodeResult(
+                success=True,
+                output={"dry_run": True, "module": module, "issue_number": issue_number, "files": files},
+            )
+        # merge, readme, design_doc, wait — skip silently
+        self._log_info(f"[dry-run] skipping {node.type} node {node.id}")
+        return NodeResult(success=True, output={"dry_run": True, "skipped": True})
 
     async def _handle_completion(
         self,
