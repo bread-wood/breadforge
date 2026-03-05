@@ -176,7 +176,15 @@ class BuildHandler:
         branch = node.context.get("branch") or self._make_branch(node.id, module)
         node.context["branch"] = branch
 
-        # Claim GitHub issue if we have one
+        # Gather issue context early so we have the real title for the bead
+        issue_title = node.context.get("issue_title", f"Implement {module or milestone}")
+        issue_body = node.context.get("issue_body", "")
+        if issue_number and not issue_body:
+            issue_data = _get_issue(repo, issue_number)
+            issue_title = issue_data.get("title", issue_title)
+            issue_body = issue_data.get("body", "")
+
+        # Claim GitHub issue with correct title now that we have it
         if issue_number and self._store:
             bead = self._store.read_work_bead(issue_number)
             if bead:
@@ -184,16 +192,9 @@ class BuildHandler:
                 bead.state = "claimed"  # type: ignore[assignment]
                 bead.node_id = node.id
                 bead.model = model
+                bead.title = issue_title
                 self._store.write_work_bead(bead)
             _claim_issue(repo, issue_number)
-
-        # Gather issue context
-        issue_title = node.context.get("issue_title", f"Implement {module or milestone}")
-        issue_body = node.context.get("issue_body", "")
-        if issue_number and not issue_body:
-            issue_data = _get_issue(repo, issue_number)
-            issue_title = issue_data.get("title", issue_title)
-            issue_body = issue_data.get("body", "")
 
         # Set up workspace: clone, branch, scope-enforcement hook
         workspace = Path(tempfile.mkdtemp(prefix=f"breadforge-{node.id}-"))

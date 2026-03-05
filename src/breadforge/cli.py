@@ -724,18 +724,29 @@ def _build_status_table(
     bead_table.add_column("Issue", style="cyan", justify="right")
     bead_table.add_column("Title")
     bead_table.add_column("State")
-    bead_table.add_column("Model")
     bead_table.add_column("Retries", justify="right")
     bead_table.add_column("Branch")
     bead_table.add_column("PR", justify="right")
+
+    def _model_tier(model: str | None) -> str:
+        """Extract human-readable tier: opus / sonnet / haiku / ''."""
+        if not model:
+            return ""
+        m = model.lower()
+        if "opus" in m:
+            return "opus"
+        if "sonnet" in m:
+            return "sonnet"
+        if "haiku" in m:
+            return "haiku"
+        return model
+
     for bead in sorted(beads, key=lambda b: b.issue_number):
         color = bead_colors.get(bead.state, "white")
-        model_short = (bead.model or "").replace("claude-", "").replace("-20251001", "")
         bead_table.add_row(
             str(bead.issue_number),
             bead.title[:50],
             f"[{color}]{bead.state}[/{color}]",
-            model_short,
             str(bead.retry_count) if bead.retry_count else "",
             bead.branch or "",
             str(bead.pr_number) if bead.pr_number else "",
@@ -760,12 +771,11 @@ def _build_status_table(
         for node in sorted(nodes, key=lambda n: n.id):
             color = node_colors.get(node.state, "white")
             node_model = (node.output or {}).get("model") or node.assigned_model or ""
-            node_model_short = node_model.replace("claude-", "").replace("-20251001", "")
             node_table.add_row(
                 node.id,
                 node.type,
                 f"[{color}]{node.state}[/{color}]",
-                node_model_short,
+                _model_tier(node_model),
                 str(node.retry_count) if node.retry_count else "",
             )
         tables.append(node_table)

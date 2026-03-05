@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from breadforge.beads.types import GraphNode
+from breadforge.config import Config
 from breadforge.graph.node import NodeResult
 
 CI_POLL_INTERVAL_SECONDS = 60
@@ -29,7 +30,6 @@ MAX_REPAIR_ATTEMPTS = 2
 
 if TYPE_CHECKING:
     from breadforge.beads.store import BeadStore
-    from breadforge.config import Config
     from breadforge.logger import Logger
 
 
@@ -174,6 +174,10 @@ Fix only what CI is complaining about. Do not refactor or expand scope."""
                 f"repair agent for PR #{pr_number} exited {result.exit_code}",
                 node_id=f"repair-{pr_number}",
             )
+
+    def recover(self, node: GraphNode, config: Config) -> NodeResult | None:
+        """Merge nodes have no recoverable state — always re-dispatch."""
+        return None
 
     async def _rebase_branch(self, branch: str, repo: str) -> bool:
         """Clone the repo, rebase the branch onto main, and force-push.
