@@ -3,11 +3,10 @@
 Re-exports GraphNode/PlanArtifact/NodeType/NodeState from beads.types for
 convenience, and adds NodeResult + NodeHandler protocol used by handlers.
 
-Extended node types (wait/consensus/design_doc) are defined here as
-ExtendedNodeType.  Nodes with these types must be constructed via
-make_node() which uses model_construct() to bypass Pydantic's Literal
-validation on GraphNode.type.  Full persistence of extended types requires
-updating NodeType in beads/types.py.
+NodeType (defined in beads/types.py) includes all supported types including
+the extended types: wait, consensus, design_doc.  ExtendedNodeType is kept
+as an alias for backward compatibility.  Use make_node() for programmatic
+node construction; GraphNode() can be used directly for all node types.
 """
 
 from __future__ import annotations
