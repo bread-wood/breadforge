@@ -29,19 +29,26 @@ __all__ = [
 
 
 class NodeResult:
-    """Result returned by a NodeHandler.execute() call."""
+    """Result returned by a NodeHandler.execute() call.
 
-    __slots__ = ("success", "output", "error")
+    abandon=True skips the normal retry cycle and marks the node abandoned immediately.
+    Use this when retrying would be pointless (e.g. build dependency already abandoned,
+    duplicate PR detected).
+    """
+
+    __slots__ = ("success", "output", "error", "abandon")
 
     def __init__(
         self,
         success: bool,
         output: dict[str, Any] | None = None,
         error: str | None = None,
+        abandon: bool = False,
     ) -> None:
         self.success = success
         self.output = output or {}
         self.error = error
+        self.abandon = abandon
 
     def __repr__(self) -> str:
         return f"NodeResult(success={self.success}, error={self.error!r})"

@@ -295,16 +295,37 @@ class GraphExecutor:
                             self._store.write_node(n)
                 self._log_info(f"plan {node.id} expanded graph: +{len(new)} nodes")
         else:
-            node.retry_count += 1
-            if node.retry_count < node.max_retries:
-                node.state = "pending"  # type: ignore[assignment]
-                self._log_info(f"node {node.id} failed (attempt {node.retry_count}), re-queuing")
-            else:
+            # abandon=True means skip retries entirely
+            if result.abandon:
                 node.state = "abandoned"  # type: ignore[assignment]
                 exec_result.abandoned.append(node.id)
-                self._log_error(
-                    f"node {node.id} abandoned after {node.retry_count} attempts: {result.error}"
-                )
+                self._log_error(f"node {node.id} abandoned immediately: {result.error}")
+            else:
+                node.retry_count += 1
+                if node.retry_count < node.max_retries:
+                    # Before re-dispatching, ask the handler if it can recover
+                    # (e.g. build node: PR already exists despite agent reporting failure)
+                    handler = self._handlers.get(node.type)
+                    if handler is not None:
+                        recovery = handler.recover(node, self._config)
+                        if recovery is not None and recovery.success:
+                            node.output = recovery.output
+                            node.state = "done"  # type: ignore[assignment]
+                            exec_result.done.append(node.id)
+                            self._log_info(
+                                f"node {node.id} recovered on retry (PR already exists)"
+                            )
+                            if self._store:
+                                self._store.write_node(node)
+                            return
+                    node.state = "pending"  # type: ignore[assignment]
+                    self._log_info(f"node {node.id} failed (attempt {node.retry_count}), re-queuing")
+                else:
+                    node.state = "abandoned"  # type: ignore[assignment]
+                    exec_result.abandoned.append(node.id)
+                    self._log_error(
+                        f"node {node.id} abandoned after {node.retry_count} attempts: {result.error}"
+                    )
 
         if self._store:
             self._store.write_node(node)

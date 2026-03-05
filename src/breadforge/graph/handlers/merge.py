@@ -21,11 +21,11 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-CI_POLL_INTERVAL_SECONDS = 60
-MAX_REPAIR_ATTEMPTS = 2
-
 from breadforge.beads.types import GraphNode
 from breadforge.graph.node import NodeResult
+
+CI_POLL_INTERVAL_SECONDS = 60
+MAX_REPAIR_ATTEMPTS = 2
 
 if TYPE_CHECKING:
     from breadforge.beads.store import BeadStore
@@ -180,6 +180,16 @@ Fix only what CI is complaining about. Do not refactor or expand scope."""
                         milestone_issue_number = build_node.context.get("milestone_issue_number")
 
         if not pr_number:
+            # If the build node is abandoned, abandon this merge node too — no point retrying
+            build_node_id = node.context.get("build_node_id")
+            if build_node_id and self._store:
+                build_node = self._store.read_node(build_node_id)
+                if build_node and build_node.state == "abandoned":
+                    return NodeResult(
+                        success=False,
+                        abandon=True,
+                        error=f"merge node: build node {build_node_id} was abandoned",
+                    )
             return NodeResult(success=False, error="merge node: no pr_number in context")
 
         repo = config.repo

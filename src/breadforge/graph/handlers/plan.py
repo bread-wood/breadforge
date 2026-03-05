@@ -404,7 +404,7 @@ class PlanHandler:
                 f"- `{m}` → #{n.context['issue_number']}"
                 if n.context.get("issue_number")
                 else f"- `{m}`"
-                for m, n in zip(artifact.modules, build_nodes)
+                for m, n in zip(artifact.modules, build_nodes, strict=False)
             )
             _comment_on_issue(
                 repo,
