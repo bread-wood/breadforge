@@ -236,13 +236,18 @@ class RollingDispatcher:
             repo=self._config.repo,
         )
 
+        # Create isolated workspace for this agent
+        import tempfile
+
+        workspace = Path(tempfile.mkdtemp(prefix=f"breadforge-{issue_number}-"))
+
         # Launch async task
         task = asyncio.create_task(
             run_agent(
                 prompt,
                 model=allocation.model,
                 timeout_minutes=self._config.agent_timeout_minutes,
-                cwd=self._repo_root,
+                cwd=workspace,
             )
         )
 
@@ -263,6 +268,13 @@ class RollingDispatcher:
             result.exit_code,
             result.duration_ms,
         )
+
+        if result.exit_code != 0 or result.stderr:
+            self._logger.error(
+                f"agent #{issue_number} stderr: {(result.stderr or '')[:500]}",
+                issue_number=issue_number,
+                exit_code=result.exit_code,
+            )
 
         bead = self._store.read_work_bead(issue_number)
         if bead is None:
