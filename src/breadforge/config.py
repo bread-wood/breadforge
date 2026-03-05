@@ -26,6 +26,10 @@ class Config:
     max_retries: int = 3
     beads_dir: Path = field(default_factory=lambda: Path.home() / ".breadforge" / "beads")
 
+    # yeast-bot GitHub token — forwarded to build agents as GH_TOKEN so they
+    # authenticate to GitHub as the service account rather than the operator.
+    github_token: str | None = None
+
     # Multi-backend routing
     # research nodes default to the anthropic subprocess path (run_agent);
     # set to "gemini" or "openai" to use the SDK-based backend directly.
@@ -52,6 +56,7 @@ class Config:
                     str(Path.home() / ".breadforge" / "beads"),
                 )
             ),
+            github_token=os.environ.get("BREADFORGE_GH_TOKEN") or None,
             research_backend=os.environ.get("BREADFORGE_RESEARCH_BACKEND", "anthropic"),
             plan_backend=os.environ.get("BREADFORGE_PLAN_BACKEND", "anthropic"),
             research_model=os.environ.get("BREADFORGE_RESEARCH_MODEL") or None,

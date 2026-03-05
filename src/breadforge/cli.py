@@ -53,6 +53,29 @@ def _require_repo(repo: str | None) -> str:
     raise typer.Exit(1)
 
 
+_BREADFORGE_BOT = "yeast-bot"
+
+_CI_WORKFLOW_TEMPLATE = """\
+name: CI
+
+on:
+  push:
+    branches: ["{branch}"]
+  pull_request:
+    branches: ["{branch}"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Run tests
+        run: uv run pytest
+      - name: Lint
+        run: uv run ruff check
+"""
+
 _REQUIRED_LABELS = [
     ("stage/impl", "0075ca", "Implementation task"),
     ("stage/research", "0075ca", "Research task"),
@@ -68,8 +91,104 @@ _REQUIRED_LABELS = [
 ]
 
 
+def _accept_bot_invitation(repo: str, token: str) -> None:
+    """Accept the pending collaborator invitation for *repo* as yeast-bot.
+
+    Uses *token* (BREADFORGE_GH_TOKEN) to authenticate as the bot user and
+    calls the GitHub Invitations API.  Silently no-ops if no invitation exists.
+    """
+    import base64 as _base64  # noqa: F401 — kept for future use; suppress unused warning
+
+    list_r = subprocess.run(
+        ["curl", "-s", "-H", f"Authorization: token {token}",
+         "https://api.github.com/user/repository_invitations"],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        invitations = json.loads(list_r.stdout)
+        matching = [
+            inv["id"] for inv in invitations
+            if inv.get("repository", {}).get("full_name", "") == repo
+        ]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return
+
+    for inv_id in matching:
+        subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "PATCH",
+             "-H", f"Authorization: token {token}",
+             f"https://api.github.com/user/repository_invitations/{inv_id}"],
+            capture_output=True,
+            text=True,
+        )
+
+
+def _add_bot_collaborator(repo: str) -> None:
+    """Add yeast-bot as a push collaborator on *repo* and auto-accept the invitation.
+
+    The PUT call runs as the repo owner (ambient gh credentials — GH_TOKEN stripped
+    so we don't accidentally auth as the bot).  The invitation is then accepted via
+    BREADFORGE_GH_TOKEN.
+    """
+    import os as _os
+
+    env = {k: v for k, v in _os.environ.items() if k != "GH_TOKEN"}
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/collaborators/{_BREADFORGE_BOT}",
+         "-X", "PUT", "-f", "permission=push"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if result.returncode != 0:
+        console.print(
+            f"  [yellow]warning:[/yellow] could not add {_BREADFORGE_BOT} to {repo}: "
+            f"{result.stderr.strip()}"
+        )
+        return
+
+    console.print(f"  {_BREADFORGE_BOT} added as collaborator on {repo}")
+
+    token = _os.environ.get("BREADFORGE_GH_TOKEN") or ""
+    if not token:
+        console.print(
+            f"  [yellow]warning:[/yellow] BREADFORGE_GH_TOKEN not set; "
+            f"cannot auto-accept invitation for {_BREADFORGE_BOT}"
+        )
+        return
+
+    _accept_bot_invitation(repo, token)
+    console.print(f"  {_BREADFORGE_BOT} accepted invitation to {repo}")
+
+
+def _install_ci_workflow(repo: str, branch: str = "mainline") -> None:
+    """Install a basic CI workflow on *repo* if one does not already exist."""
+    import base64
+
+    # Check if ci.yml already exists
+    r = subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/.github/workflows/ci.yml"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode == 0:
+        return  # already exists — _ensure_ci_auth will patch it if needed
+
+    content = _CI_WORKFLOW_TEMPLATE.format(branch=branch)
+    encoded = base64.b64encode(content.encode()).decode()
+    subprocess.run(
+        ["gh", "api", f"repos/{repo}/contents/.github/workflows/ci.yml",
+         "-X", "PUT",
+         "-f", "message=ci: install breadforge CI workflow",
+         "-f", f"content={encoded}"],
+        capture_output=True,
+        text=True,
+    )
+
+
 def _init_empty_repo(repo: str) -> None:
-    """Create an initial empty commit on repos with no commits (no default branch)."""
+    """Create an initial empty commit on repos with no commits, using 'mainline' as default."""
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="breadforge-init-") as tmpdir:
@@ -80,7 +199,7 @@ def _init_empty_repo(repo: str) -> None:
             capture_output=True,
             text=True,
         )
-        subprocess.run(["git", "checkout", "-b", "main"], cwd=tmppath, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", "mainline"], cwd=tmppath, capture_output=True)
         subprocess.run(
             ["git", "commit", "--allow-empty", "-m", "chore: initialize repository"],
             cwd=tmppath,
@@ -88,8 +207,14 @@ def _init_empty_repo(repo: str) -> None:
             text=True,
         )
         subprocess.run(
-            ["git", "push", "-u", "origin", "main"],
+            ["git", "push", "-u", "origin", "mainline"],
             cwd=tmppath,
+            capture_output=True,
+            text=True,
+        )
+        # Set the GitHub default branch to mainline
+        subprocess.run(
+            ["gh", "api", f"repos/{repo}", "-X", "PATCH", "-f", "default_branch=mainline"],
             capture_output=True,
             text=True,
         )
@@ -186,7 +311,8 @@ def _scaffold_repo(repo: str) -> None:
     except (json.JSONDecodeError, KeyError):
         pass
 
-    # Patch CI workflow if needed
+    # Install CI workflow if missing, then patch auth if needed
+    _install_ci_workflow(repo, branch="mainline")
     _ensure_ci_auth(repo)
 
     # Get existing labels
@@ -326,7 +452,13 @@ def _seed_work_beads(
     new_numbers = []
     for issue in issues:
         n = issue["number"]
-        if store.read_work_bead(n) is not None:
+        existing = store.read_work_bead(n)
+        if existing is not None:
+            # Always sync the title from GitHub — the issue may have been renamed
+            # after the bead was first created (e.g. plan handler renames module issues).
+            if existing.title != issue["title"]:
+                existing.title = issue["title"]
+                store.write_work_bead(existing)
             continue
         bead = WorkBead(
             issue_number=n,
@@ -415,12 +547,18 @@ def run(
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
     """Parse spec(s), file GitHub issues, and dispatch agents."""
+    import os as _os
+
     repo = _require_repo(repo)
     config = Config.from_env(repo)
     if concurrency:
         config.concurrency = concurrency
     if model:
         config.model = model
+
+    # Forward yeast-bot token as GH_TOKEN so agents authenticate as the service account
+    if config.github_token:
+        _os.environ.setdefault("GH_TOKEN", config.github_token)
 
     # Health check
     report = run_health_checks(repo)
@@ -1139,28 +1277,12 @@ def repo_add(
     registry.add(entry)
     console.print(f"[green]Registered[/green] {repo_name}")
 
-    # Scaffold labels and milestones
+    # Scaffold labels, CI workflow
     _scaffold_repo(repo_name)
-    console.print("  labels scaffolded")
+    console.print("  labels and CI workflow scaffolded")
 
-    # Add yeast-bot as collaborator
-    r = subprocess.run(
-        [
-            "gh",
-            "api",
-            f"repos/{repo_name}/collaborators/yeast-bot",
-            "--method",
-            "PUT",
-            "-f",
-            "permission=push",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode == 0:
-        console.print("  yeast-bot added as collaborator")
-    else:
-        console.print(f"  [yellow]warning:[/yellow] could not add yeast-bot: {r.stderr.strip()}")
+    # Add yeast-bot as collaborator and accept invitation
+    _add_bot_collaborator(repo_name)
 
 
 @repo_app.command("remove")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -36,6 +38,71 @@ class HealthReport:
     @property
     def warnings(self) -> list[CheckResult]:
         return [c for c in self.checks if c.status == CheckStatus.WARN]
+
+
+def _check_bot_collaborator(repo: str, bot_token: str) -> CheckResult:
+    """Check that yeast-bot is an active collaborator; auto-add and accept invitation if not.
+
+    Runs the PUT collaborator call as the repo owner (ambient gh credentials),
+    then accepts the invitation as yeast-bot using *bot_token*.
+    """
+    # Check current status
+    check = subprocess.run(
+        ["gh", "api", f"repos/{repo}/collaborators/yeast-bot", "--silent"],
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode == 0:
+        return CheckResult(
+            "bot-collaborator", CheckStatus.PASS, f"yeast-bot is a collaborator on {repo}"
+        )
+
+    # Not yet a collaborator — add using owner's ambient gh auth (no GH_TOKEN override)
+    env = {k: v for k, v in os.environ.items() if k != "GH_TOKEN"}
+    add = subprocess.run(
+        ["gh", "api", f"repos/{repo}/collaborators/yeast-bot", "-X", "PUT", "-f", "permission=push"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if add.returncode != 0:
+        return CheckResult(
+            "bot-collaborator",
+            CheckStatus.FAIL,
+            f"could not add yeast-bot to {repo}: {add.stderr.strip()} — "
+            f"run: gh api repos/{repo}/collaborators/yeast-bot -X PUT -f permission=push",
+        )
+
+    # Accept the pending invitation as yeast-bot
+    list_r = subprocess.run(
+        ["curl", "-s", "-H", f"Authorization: token {bot_token}",
+         "https://api.github.com/user/repository_invitations"],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        invitations = json.loads(list_r.stdout)
+        matching = [
+            inv["id"] for inv in invitations
+            if inv.get("repository", {}).get("full_name", "") == repo
+        ]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        matching = []
+
+    for inv_id in matching:
+        subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-X", "PATCH",
+             "-H", f"Authorization: token {bot_token}",
+             f"https://api.github.com/user/repository_invitations/{inv_id}"],
+            capture_output=True,
+            text=True,
+        )
+
+    return CheckResult(
+        "bot-collaborator",
+        CheckStatus.PASS,
+        f"added yeast-bot as collaborator on {repo} and accepted {len(matching)} invitation(s)",
+    )
 
 
 def run_health_checks(repo: str) -> HealthReport:
@@ -127,6 +194,27 @@ def run_health_checks(repo: str) -> HealthReport:
         )
 
     # 7. Not running inside Claude Code (nesting guard)
+    # 5. BREADFORGE_GH_TOKEN present (required for yeast-bot operations)
+    bot_token = os.environ.get("BREADFORGE_GH_TOKEN") or ""
+    if bot_token:
+        checks.append(
+            CheckResult("bot-token", CheckStatus.PASS, "BREADFORGE_GH_TOKEN is set")
+        )
+    else:
+        checks.append(
+            CheckResult(
+                "bot-token",
+                CheckStatus.FAIL,
+                "BREADFORGE_GH_TOKEN is not set. "
+                "Set it to yeast-bot's GitHub token (repo + workflow scopes) "
+                "so build agents can authenticate to GitHub as the service account.",
+            )
+        )
+
+    # 6. yeast-bot is repo collaborator (auto-adds and accepts invitation if missing)
+    if repo and bot_token:
+        checks.append(_check_bot_collaborator(repo, bot_token))
+
     if os.environ.get("BREADFORGE_AGENT") == "1":
         checks.append(
             CheckResult(
