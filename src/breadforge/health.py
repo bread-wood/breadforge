@@ -84,7 +84,7 @@ def _check_bot_collaborator(repo: str, bot_token: str) -> CheckResult:
         invitations = json.loads(list_r.stdout)
         matching = [
             inv["id"] for inv in invitations
-            if inv.get("repository", {}).get("full_name", "") == repo
+            if isinstance(inv, dict) and inv.get("repository", {}).get("full_name", "") == repo
         ]
     except (json.JSONDecodeError, KeyError, TypeError):
         matching = []

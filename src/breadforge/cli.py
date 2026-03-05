@@ -556,19 +556,17 @@ def run(
     if model:
         config.model = model
 
-    # All git ops (issue claims, PRs, comments, merges) run as yeast-bot.
-    # Always override GH_TOKEN — the bot token takes precedence over any
-    # ambient operator credentials so every gh CLI call in the orchestrator
-    # and in build agents authenticates as the service account.
-    if config.github_token:
-        _os.environ["GH_TOKEN"] = config.github_token
-
-    # Health check
+    # Health check runs with operator credentials so gh-auth passes cleanly.
     report = run_health_checks(repo)
     if not report.healthy:
         for c in report.fatal:
             console.print(f"[red]FATAL[/red] {c.name}: {c.message}")
         raise typer.Exit(1)
+
+    # After health checks pass, switch all gh ops to yeast-bot for the rest of
+    # this process (orchestrator + agent subprocesses).
+    if config.github_token:
+        _os.environ["GH_TOKEN"] = config.github_token
 
     # Scaffold repo: labels, default branch protection
     if not dry_run:
@@ -894,7 +892,8 @@ def _build_status_table(
         )
     tables.append(bead_table)
 
-    nodes = store.list_nodes()
+    all_nodes = store.list_nodes()
+    nodes = [n for n in all_nodes if not milestone or n.id.startswith(f"{milestone}-")]
     if nodes:
         node_colors = {
             "pending": "dim",
@@ -928,7 +927,7 @@ def _build_status_table(
         # Estimated cost across all completed nodes
         total_cost = sum(
             (n.output or {}).get("cost_usd", 0.0)
-            for n in nodes
+            for n in nodes  # already filtered by milestone
             if n.state == "done" and (n.output or {}).get("cost_usd") is not None
         )
         if total_cost > 0:
