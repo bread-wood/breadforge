@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+
+    <!-- Title -->
+    <mxCell id="title" value="breadforge — Execution Loop" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="477" y="30" width="400" height="40" as="geometry" />
+    </mxCell>
+
+    <!-- ── INPUTS ── -->
+    <mxCell id="spec" value="📄 Spec File(.md)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="120" y="120" width="160" height="60" as="geometry" />
+    </mxCell>
+
+    <mxCell id="repo" value="🐙 GitHub Repo" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="120" y="210" width="160" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- ── CLI ENTRY ── -->
+    <mxCell id="cli" value="breadforge run" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="370" y="155" width="160" height="60" as="geometry" />
+    </mxCell>
+
+    <mxCell id="e-spec-cli" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="spec" target="cli" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e-repo-cli" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="repo" target="cli" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- ── SCAFFOLD ── -->
+    <mxCell id="scaffold" value="Scaffold Repo&#xa;(labels, init commit)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="370" y="280" width="160" height="55" as="geometry" />
+    </mxCell>
+
+    <mxCell id="e-cli-scaffold" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="cli" target="scaffold" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- ── EXECUTION GRAPH ── -->
+    <mxCell id="graph-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f8f8;strokeColor=#999999;dashed=1;strokeWidth=2;verticalAlign=top;" vertex="1" parent="1">
+      <mxGeometry x="600" y="100" width="860" height="760" as="geometry" />
+    </mxCell>
+    <mxCell id="graph-label" value="ExecutionGraph (DAG)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;fontSize=13;fontStyle=3;fontColor=#666666;" vertex="1" parent="1">
+      <mxGeometry x="612" y="108" width="220" height="24" as="geometry" />
+    </mxCell>
+
+    <!-- PLAN NODE -->
+    <mxCell id="plan" value="🧠 plan node&#xa;(Anthropic SDK)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="660" y="155" width="180" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- plan inputs -->
+    <mxCell id="plan-spec" value="spec text" style="text;html=1;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+      <mxGeometry x="648" y="145" width="70" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="plan-ctx" value="codebase ctx" style="text;html=1;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+      <mxGeometry x="648" y="215" width="85" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="plan-research" value="research findings" style="text;html=1;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+      <mxGeometry x="648" y="230" width="110" height="20" as="geometry" />
+    </mxCell>
+
+    <!-- confidence gate -->
+    <mxCell id="confidence" value="confidence ≥ 0.6?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="680" y="270" width="140" height="80" as="geometry" />
+    </mxCell>
+
+    <!-- research path -->
+    <mxCell id="research" value="🔍 research node&#xa;(WebSearch / WebFetch&#xa;15 min timeout)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="620" y="410" width="190" height="70" as="geometry" />
+    </mxCell>
+
+    <mxCell id="plan-refine" value="🧠 plan-refine node&#xa;(re-plan with findings)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="620" y="530" width="190" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- build nodes -->
+    <mxCell id="build-a" value="🔨 build node A&#xa;module: game&#xa;files: game.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="880" y="270" width="170" height="70" as="geometry" />
+    </mxCell>
+
+    <mxCell id="build-b" value="🔨 build node B&#xa;module: ui&#xa;files: main.py, ui.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="1080" y="270" width="170" height="70" as="geometry" />
+    </mxCell>
+
+    <!-- overlap detection -->
+    <mxCell id="overlap" value="overlap detector&#xa;(shared files → sequential edge)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+      <mxGeometry x="930" y="190" width="200" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- merge nodes -->
+    <mxCell id="merge-a" value="✅ merge node A&#xa;poll CI → squash merge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="880" y="410" width="170" height="60" as="geometry" />
+    </mxCell>
+
+    <mxCell id="merge-b" value="✅ merge node B&#xa;poll CI → squash merge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="1080" y="410" width="170" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- readme node -->
+    <mxCell id="readme" value="📝 readme node&#xa;(write README, open PR)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="980" y="540" width="180" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- GitHub issues filed -->
+    <mxCell id="gh-issues" value="📋 GitHub issues filed&#xa;per module (stage/impl)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+      <mxGeometry x="880" y="145" width="170" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- Claude Code agents -->
+    <mxCell id="agent-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;dashed=1;strokeWidth=1;" vertex="1" parent="1">
+      <mxGeometry x="870" y="355" width="400" height="130" as="geometry" />
+    </mxCell>
+    <mxCell id="agent-label" value="Claude Code sub-agents (parallel, isolated tempdir)" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=11;fontStyle=3;fontColor=#666666;" vertex="1" parent="1">
+      <mxGeometry x="880" y="358" width="380" height="18" as="geometry" />
+    </mxCell>
+
+    <!-- beads store -->
+    <mxCell id="beads" value="💾 BeadStore&#xa;~/.breadforge/beads/&#xa;graph/*.json  research/*.md" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="660" y="660" width="200" height="75" as="geometry" />
+    </mxCell>
+
+    <!-- status output -->
+    <mxCell id="status" value="breadforge status&#xa;Work Beads + Graph Nodes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="1180" y="660" width="200" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- ── EDGES ── -->
+
+    <!-- scaffold → plan -->
+    <mxCell id="e-scaffold-plan" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="scaffold" target="plan" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- plan → confidence -->
+    <mxCell id="e-plan-conf" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="plan" target="confidence" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- confidence → NO → research -->
+    <mxCell id="e-conf-no" value="No" style="edgeStyle=orthogonalEdgeStyle;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" source="confidence" target="research" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- research → plan-refine -->
+    <mxCell id="e-research-refine" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="research" target="plan-refine" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- plan-refine → confidence (loop back) -->
+    <mxCell id="e-refine-conf" value="re-evaluate" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" source="plan-refine" target="confidence" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="840" y="560" />
+          <mxPoint x="840" y="310" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- confidence → YES → file GH issues + emit build nodes -->
+    <mxCell id="e-conf-gh" value="Yes" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" edge="1" source="confidence" target="gh-issues" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- gh-issues → overlap -->
+    <mxCell id="e-gh-overlap" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="gh-issues" target="overlap" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- overlap → build nodes -->
+    <mxCell id="e-overlap-ba" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="overlap" target="build-a" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e-overlap-bb" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="overlap" target="build-b" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- build → merge (depends_on) -->
+    <mxCell id="e-ba-ma" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="build-a" target="merge-a" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e-bb-mb" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="build-b" target="merge-b" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- merge → readme (both must complete) -->
+    <mxCell id="e-ma-readme" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="merge-a" target="readme" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e-mb-readme" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="merge-b" target="readme" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- nodes → beads store (write) -->
+    <mxCell id="e-plan-beads" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#666666;" edge="1" source="plan" target="beads" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e-merge-beads" style="edgeStyle=orthogonalEdgeStyle;dashed=1;strokeColor=#666666;exitX=0;exitY=1;exitDx=0;exitDy=0;" edge="1" source="merge-a" target="beads" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- beads → status -->
+    <mxCell id="e-beads-status" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="beads" target="status" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- legend -->
+    <mxCell id="leg-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f8f8;strokeColor=#cccccc;" vertex="1" parent="1">
+      <mxGeometry x="120" y="400" width="200" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="leg-title" value="Legend" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+      <mxGeometry x="130" y="408" width="80" height="20" as="geometry" />
+    </mxCell>
+    <mxCell id="leg-plan" value="Plan / Research" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="130" y="435" width="130" height="28" as="geometry" />
+    </mxCell>
+    <mxCell id="leg-build" value="Build (agent)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="130" y="470" width="130" height="28" as="geometry" />
+    </mxCell>
+    <mxCell id="leg-merge" value="Merge / Readme" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="130" y="505" width="130" height="28" as="geometry" />
+    </mxCell>
+    <mxCell id="leg-gate" value="Decision gate" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="130" y="540" width="130" height="40" as="geometry" />
+    </mxCell>
+    <mxCell id="leg-dash" value="─ ─  writes to store" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+      <mxGeometry x="130" y="585" width="160" height="20" as="geometry" />
+    </mxCell>
+
+    <!-- retry annotation -->
+    <mxCell id="retry-note" value="max_retries=3 (build)&#xa;max_retries=20 (merge, 60s sleep)" style="text;html=1;strokeColor=none;fillColor=#fff2cc;align=left;fontSize=11;fontStyle=2;rounded=1;strokeColor=#d6b656;" vertex="1" parent="1">
+      <mxGeometry x="1280" y="390" width="230" height="40" as="geometry" />
+    </mxCell>
+
+    <!-- dedup annotation -->
+    <mxCell id="dedup-note" value="Re-runs restore done/abandoned&#xa;nodes from BeadStore (no re-work)" style="text;html=1;strokeColor=none;fillColor=#d5e8d4;align=left;fontSize=11;fontStyle=2;rounded=1;strokeColor=#82b366;" vertex="1" parent="1">
+      <mxGeometry x="620" y="760" width="240" height="40" as="geometry" />
+    </mxCell>
+
+  </root>
+</mxGraphModel>

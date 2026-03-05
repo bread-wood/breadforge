@@ -135,6 +135,24 @@ class Logger:
             },
         )
 
+    def node_dispatch(self, node_id: str, node_type: str, model: str | None = None) -> None:
+        self._write(
+            "node_dispatch",
+            {"node_id": node_id, "node_type": node_type, "model": model},
+        )
+
+    def node_done(self, node_id: str, node_type: str, duration_ms: float = 0.0) -> None:
+        self._write(
+            "node_done",
+            {"node_id": node_id, "node_type": node_type, "duration_ms": duration_ms},
+        )
+
+    def node_failed(self, node_id: str, node_type: str, error: str) -> None:
+        self._write(
+            "node_failed",
+            {"node_id": node_id, "node_type": node_type, "error": error},
+        )
+
     def cost(self, provider: str, model: str, cost_usd: float, caller: str | None = None) -> None:
         self._write(
             "cost",

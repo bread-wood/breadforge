@@ -99,8 +99,12 @@ class TestValidateSpec:
         missing = validate_spec(SAMPLE_SPEC)
         assert missing == []
 
-    def test_missing_section_detected(self) -> None:
-        text = "# Project\n## Overview\nsome text\n## Success Criteria\n- [ ] thing\n"
-        missing = validate_spec(text)
-        assert "## Scope" in missing
-        assert "## Key Unknowns" in missing
+    def test_missing_title_detected(self) -> None:
+        text = "## Overview\nsome text\n## Success Criteria\n- [ ] thing\n"
+        errors = validate_spec(text)
+        assert any("title" in e for e in errors)
+
+    def test_partial_spec_is_valid(self) -> None:
+        # Missing Scope/Key Unknowns is no longer an error
+        text = "# Project\n## Overview\nsome text\n## Goals\n- thing done\n"
+        assert validate_spec(text) == []

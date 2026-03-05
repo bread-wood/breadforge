@@ -69,7 +69,7 @@ class TestDetectAnomalies:
         store._work_dir.mkdir(parents=True, exist_ok=True)
         (store._work_dir / "10.json").write_text(json.dumps(data))
 
-        with patch("breadforge.monitor._gh") as mock_gh:
+        with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout="[]")
             anomalies = _detect_anomalies(store, "owner/repo", stuck_minutes=60)
 
@@ -82,7 +82,7 @@ class TestDetectAnomalies:
         bead.state = "claimed"  # type: ignore
         store.write_work_bead(bead)
 
-        with patch("breadforge.monitor._gh") as mock_gh:
+        with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout="[]")
             anomalies = _detect_anomalies(store, "owner/repo", stuck_minutes=120)
 
@@ -91,7 +91,7 @@ class TestDetectAnomalies:
 
     def test_detects_stale_label(self, store: BeadStore) -> None:
         # No claimed beads, but GitHub returns an in-progress issue
-        with patch("breadforge.monitor._gh") as mock_gh:
+        with patch("breadforge.monitor.detect._gh") as mock_gh:
             import json
 
             def gh_side_effect(*args):

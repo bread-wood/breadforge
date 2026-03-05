@@ -1,25 +1,58 @@
 """Spec file parser.
 
 Parses milestone spec markdown files into structured MilestoneSpec objects.
-Each spec file describes one milestone: what to build, success criteria, scope,
-key unknowns, and affected modules.
 
-Expected format (following brimstone-specs TEMPLATE.md):
+## Spec format
+
+The spec format is deliberately permissive. The only hard requirement is a
+`# Title` heading. Every other section is optional — the plan agent infers
+missing structure from free text.
+
+### Minimal valid spec
+
+  # Minesweeper — Desktop Game
+
+  A classic minesweeper game. The player reveals and flags cells.
+  Mines are randomly placed. Standard 9x9 rules apply.
+
+### Full spec
 
   # Project vX.Y.Z — Milestone Name
+
   ## Overview
-  ...
-  ## Success Criteria
-  - [ ] criterion
-  ## Scope
-  ### Included
-  - item
-  ### Excluded
-  - item
-  ## Key Unknowns
-  - **[P1]** question
+  Free text description of what to build.
+
+  ## Goals  (alias: Success Criteria)
+  - Done looks like this
+  - And this
+
+  ## Out of Scope  (alias: Scope / Excluded)
+  - Not this
+  - Or this
+
+  ## Open Questions  (alias: Key Unknowns)
+  - **[P1]** Which UI library?
+  - **[?]** Completely open — agent decides
+
+  ## Constraints
+  - Must use Python 3.11+
+  - No third-party HTTP clients
+
   ## Modules
-  - module-name: description
+  - game: board state, mine placement, reveal logic
+  - ui: pygame rendering and event loop
+
+### Ambiguity markers
+
+  - `[P0]`–`[P4]` — priority; missing priority defaults to `[P2]`
+  - `[?]` — completely undecided; agent must choose
+  - No Modules section → plan agent proposes its own module breakdown
+
+### Section aliases (all accepted)
+
+  Goals / Success Criteria
+  Out of Scope / Scope (Excluded subsection) / Excluded
+  Open Questions / Key Unknowns / Unknowns
 """
 
 from __future__ import annotations
@@ -66,6 +99,32 @@ class MilestoneSpec:
         return f"impl: {self.milestone_name}"
 
 
+_SECTION_ALIASES: dict[str, str] = {
+    # Goals / success criteria
+    "goals": "goals",
+    "success criteria": "goals",
+    # Out of scope
+    "out of scope": "out of scope",
+    "excluded": "out of scope",
+    "explicitly excluded": "out of scope",
+    # Open questions / key unknowns
+    "open questions": "open questions",
+    "key unknowns": "open questions",
+    "unknowns": "open questions",
+    # Pass-through sections
+    "overview": "overview",
+    "scope": "scope",
+    "constraints": "constraints",
+    "modules": "modules",
+}
+
+
+def _normalize_section(raw: str) -> str:
+    """Normalize a section heading to a canonical key."""
+    key = raw.strip().lower().split("(")[0].strip()  # strip parenthetical notes
+    return _SECTION_ALIASES.get(key, key)
+
+
 def parse_spec(path: Path) -> MilestoneSpec:
     """Parse a spec markdown file into a MilestoneSpec."""
     raw = path.read_text(encoding="utf-8")
@@ -101,10 +160,13 @@ def parse_spec(path: Path) -> MilestoneSpec:
     current_section = ""
     current_subsection = ""
 
+    # Collect free-text lines when no structured section matches (folded into overview)
+    free_lines: list[str] = []
+
     for line in lines[1:]:
         # Section headers
         if line.startswith("## "):
-            current_section = line[3:].strip().lower()
+            current_section = _normalize_section(line[3:].strip())
             current_subsection = ""
             continue
         if line.startswith("### "):
@@ -119,28 +181,41 @@ def parse_spec(path: Path) -> MilestoneSpec:
             if line.strip():
                 overview_lines.append(line.strip())
 
-        elif current_section == "success criteria":
-            m = re.match(r"^\s*-\s*\[[ x]\]\s*(.+)$", line)
+        elif current_section == "goals":
+            # Accept: "- [ ] text", "- [x] text", "- **[Px]** text", "- text"
+            m = re.match(r"^\s*-\s*(?:\[[ x?]\]\s*|\*\*\[(?:P[0-4]|\?)\]\*\*\s*)?(.+)$", line)
             if m:
-                success_criteria.append(m.group(1).strip())
+                text = m.group(1).strip()
+                if text:
+                    success_criteria.append(text)
 
         elif current_section == "scope":
-            if current_subsection == "included" or (
-                not current_subsection and line.strip().startswith("- ")
-            ):
+            if current_subsection in ("included", ""):
+                if line.strip().startswith("- "):
+                    item = line.strip().lstrip("- ").strip()
+                    if item:
+                        scope_included.append(item)
+            elif current_subsection in ("excluded", "explicitly excluded", "out of scope"):
                 item = line.strip().lstrip("- ").strip()
-                if item and not item.startswith("#"):
-                    scope_included.append(item)
-            elif current_subsection in ("excluded", "explicitly excluded"):
-                item = line.strip().lstrip("- ").strip()
-                if item and not item.startswith("#"):
+                if item:
                     scope_excluded.append(item)
 
-        elif current_section == "key unknowns":
-            # "- **[P1]** question text"
-            m = re.match(r"^\s*-\s*\*\*\[(P[0-4])\]\*\*\s*(.+)$", line)
+        elif current_section == "out of scope":
+            item = line.strip().lstrip("- ").strip()
+            if item:
+                scope_excluded.append(item)
+
+        elif current_section == "constraints":
+            item = line.strip().lstrip("- ").strip()
+            if item:
+                scope_included.append(f"[constraint] {item}")
+
+        elif current_section == "open questions":
+            # Accept: "- **[P1]** text", "- **[?]** text", "- text"
+            m = re.match(r"^\s*-\s*\*\*\[(P[0-4]|\?)\]\*\*\s*(.+)$", line)
             if m:
-                key_unknowns.append(KeyUnknown(priority=m.group(1), text=m.group(2).strip()))
+                priority = "P2" if m.group(1) == "?" else m.group(1)
+                key_unknowns.append(KeyUnknown(priority=priority, text=m.group(2).strip()))
             elif line.strip().startswith("- "):
                 text = line.strip().lstrip("- ").strip()
                 if text:
@@ -151,6 +226,15 @@ def parse_spec(path: Path) -> MilestoneSpec:
             m = re.match(r"^\s*-\s*([\w/-]+):\s*(.+)$", line)
             if m:
                 modules.append(ModuleSpec(name=m.group(1).strip(), description=m.group(2).strip()))
+
+        elif current_section == "":
+            # Free text before any section — treat as overview
+            if line.strip():
+                free_lines.append(line.strip())
+
+    # If no explicit overview, use free text that appeared before any section
+    if not overview_lines and free_lines:
+        overview_lines = free_lines
 
     return MilestoneSpec(
         path=path,
@@ -167,21 +251,18 @@ def parse_spec(path: Path) -> MilestoneSpec:
     )
 
 
-_REQUIRED_SECTIONS = [
-    "## Overview",
-    "## Success Criteria",
-    "## Scope",
-    "## Key Unknowns",
-]
-
-
 def validate_spec(spec_text: str) -> list[str]:
-    """Return list of missing required sections."""
-    missing = []
-    for section in _REQUIRED_SECTIONS:
-        if section not in spec_text:
-            missing.append(section)
-    return missing
+    """Return list of validation errors.
+
+    Only hard-fails if there is no title heading at all.  Missing optional
+    sections are not errors — the plan agent infers structure from free text.
+    """
+    errors = []
+    lines = spec_text.strip().splitlines()
+    has_title = any(line.startswith("# ") for line in lines[:3])
+    if not has_title:
+        errors.append("missing title: first line must be a # heading")
+    return errors
 
 
 def parse_campaign(campaign_path: Path) -> list[tuple[str, list[Path]]]:
