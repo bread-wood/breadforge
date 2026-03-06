@@ -787,6 +787,17 @@ def _run_single_spec(
 
     console.print(f"\n[bold]{spec.title}[/bold] → milestone: {ms}")
 
+    # Guard: warn if spec project name doesn't match the target repo
+    repo_name = repo.split("/")[-1].lower()
+    spec_project = spec.project.lower()
+    if spec_project not in repo_name and repo_name not in spec_project:
+        console.print(
+            f"[yellow]warning:[/yellow] spec project [bold]{spec.project!r}[/bold] "
+            f"does not match target repo [bold]{repo!r}[/bold]"
+        )
+        if not typer.confirm("Continue anyway?", default=False):
+            return []
+
     # Ensure milestone exists
     if not dry_run and not _ensure_milestone(repo, ms):
         console.print(f"[red]error:[/red] could not create milestone {ms}")
