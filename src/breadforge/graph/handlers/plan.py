@@ -243,7 +243,6 @@ def _slug(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "-", s).strip("-")
 
 
-
 def _file_module_issue(
     repo: str, module: str, milestone_slug: str, artifact: PlanArtifact
 ) -> int | None:
@@ -269,8 +268,7 @@ def _file_module_issue(
         f"**Module:** `{module}`\n\n"
         f"**What to implement:** {module_approach}\n"
         f"{other_scope_note}\n\n"
-        f"**Files to create/modify (your scope only):**\n"
-        + "\n".join(f"- `{f}`" for f in files)
+        f"**Files to create/modify (your scope only):**\n" + "\n".join(f"- `{f}`" for f in files)
     )
     result = subprocess.run(
         [
@@ -466,7 +464,9 @@ class PlanHandler:
                 override_model=config.model or None,
             )
             merge_nodes = _emit_merge_nodes(build_nodes)
-            readme_node = _emit_readme_node(merge_nodes, artifact, milestone_slug, repo, milestone_issue_number)
+            readme_node = _emit_readme_node(
+                merge_nodes, artifact, milestone_slug, repo, milestone_issue_number
+            )
             new_nodes = build_nodes + merge_nodes + [readme_node]
 
         return NodeResult(

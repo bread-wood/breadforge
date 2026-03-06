@@ -60,7 +60,15 @@ def _check_bot_collaborator(repo: str, bot_token: str) -> CheckResult:
     # so we don't accidentally auth as the bot)
     env = {k: v for k, v in os.environ.items() if k != "GH_TOKEN"}
     add = subprocess.run(
-        ["gh", "api", f"repos/{repo}/collaborators/yeast-bot", "-X", "PUT", "-f", "permission=push"],
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/collaborators/yeast-bot",
+            "-X",
+            "PUT",
+            "-f",
+            "permission=push",
+        ],
         capture_output=True,
         text=True,
         env=env,
@@ -81,8 +89,13 @@ def _check_bot_collaborator(repo: str, bot_token: str) -> CheckResult:
 
     # Accept the invitation as yeast-bot
     list_result = subprocess.run(
-        ["curl", "-s", "-H", f"Authorization: token {bot_token}",
-         "https://api.github.com/user/repository_invitations"],
+        [
+            "curl",
+            "-s",
+            "-H",
+            f"Authorization: token {bot_token}",
+            "https://api.github.com/user/repository_invitations",
+        ],
         capture_output=True,
         text=True,
     )
@@ -98,9 +111,19 @@ def _check_bot_collaborator(repo: str, bot_token: str) -> CheckResult:
 
     for inv_id in matching_ids:
         accept = subprocess.run(
-            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-             "-X", "PATCH", "-H", f"Authorization: token {bot_token}",
-             f"https://api.github.com/user/repository_invitations/{inv_id}"],
+            [
+                "curl",
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-X",
+                "PATCH",
+                "-H",
+                f"Authorization: token {bot_token}",
+                f"https://api.github.com/user/repository_invitations/{inv_id}",
+            ],
             capture_output=True,
             text=True,
         )
@@ -223,16 +246,26 @@ def run_health_checks(repo: str) -> HealthReport:
     else:
         # Validate token actually works by calling the GitHub API as yeast-bot
         token_check = subprocess.run(
-            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-             "-H", f"Authorization: token {bot_token}",
-             "https://api.github.com/user"],
+            [
+                "curl",
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-H",
+                f"Authorization: token {bot_token}",
+                "https://api.github.com/user",
+            ],
             capture_output=True,
             text=True,
             timeout=10,
         )
         http_code = token_check.stdout.strip()
         if http_code == "200":
-            checks.append(CheckResult("bot-token", CheckStatus.PASS, "BREADFORGE_GH_TOKEN is set and valid"))
+            checks.append(
+                CheckResult("bot-token", CheckStatus.PASS, "BREADFORGE_GH_TOKEN is set and valid")
+            )
         else:
             checks.append(
                 CheckResult(

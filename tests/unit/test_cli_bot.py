@@ -6,8 +6,6 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 def _proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
     return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
@@ -22,13 +20,15 @@ class TestAcceptBotInvitation:
     def test_accepts_matching_invitation(self) -> None:
         from breadforge.cli import _accept_bot_invitation
 
-        invite_json = json.dumps([
-            {"id": 42, "repository": {"full_name": "owner/repo"}},
-            {"id": 99, "repository": {"full_name": "other/repo"}},
-        ])
+        invite_json = json.dumps(
+            [
+                {"id": 42, "repository": {"full_name": "owner/repo"}},
+                {"id": 99, "repository": {"full_name": "other/repo"}},
+            ]
+        )
         responses = [
             _proc(0, invite_json),  # list
-            _proc(0, "204"),        # accept inv 42 only
+            _proc(0, "204"),  # accept inv 42 only
         ]
         with patch("subprocess.run", side_effect=responses) as mock_run:
             _accept_bot_invitation("owner/repo", "tok")
@@ -37,10 +37,12 @@ class TestAcceptBotInvitation:
     def test_accepts_multiple_invitations_for_same_repo(self) -> None:
         from breadforge.cli import _accept_bot_invitation
 
-        invite_json = json.dumps([
-            {"id": 1, "repository": {"full_name": "owner/repo"}},
-            {"id": 2, "repository": {"full_name": "owner/repo"}},
-        ])
+        invite_json = json.dumps(
+            [
+                {"id": 1, "repository": {"full_name": "owner/repo"}},
+                {"id": 2, "repository": {"full_name": "owner/repo"}},
+            ]
+        )
         responses = [
             _proc(0, invite_json),
             _proc(0, "204"),
@@ -60,7 +62,9 @@ class TestAcceptBotInvitation:
     def test_non_dict_items_in_list_are_skipped(self) -> None:
         from breadforge.cli import _accept_bot_invitation
 
-        bad_json = json.dumps(["a string", None, {"id": 5, "repository": {"full_name": "owner/repo"}}])
+        bad_json = json.dumps(
+            ["a string", None, {"id": 5, "repository": {"full_name": "owner/repo"}}]
+        )
         responses = [
             _proc(0, bad_json),
             _proc(0, "204"),
@@ -83,7 +87,9 @@ class TestAcceptBotInvitation:
             _proc(0, "403"),
         ]
         with patch("subprocess.run", side_effect=responses):
-            _accept_bot_invitation("owner/repo", "tok")  # must not raise; warning printed by console
+            _accept_bot_invitation(
+                "owner/repo", "tok"
+            )  # must not raise; warning printed by console
 
 
 # ---------------------------------------------------------------------------
@@ -96,20 +102,24 @@ class TestAddBotCollaborator:
         from breadforge.cli import _add_bot_collaborator
 
         responses = [
-            _proc(0),       # PUT collaborator
-            _proc(0, "[]"), # list invitations (none pending)
+            _proc(0),  # PUT collaborator
+            _proc(0, "[]"),  # list invitations (none pending)
         ]
-        with patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "tok"}):
-            with patch("subprocess.run", side_effect=responses) as mock_run:
-                _add_bot_collaborator("owner/repo")
+        with (
+            patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "tok"}),
+            patch("subprocess.run", side_effect=responses) as mock_run,
+        ):
+            _add_bot_collaborator("owner/repo")
         assert mock_run.call_count == 2
 
     def test_add_fails_does_not_call_accept(self) -> None:
         from breadforge.cli import _add_bot_collaborator
 
-        with patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "tok"}):
-            with patch("subprocess.run", return_value=_proc(1, stderr="forbidden")) as mock_run:
-                _add_bot_collaborator("owner/repo")
+        with (
+            patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "tok"}),
+            patch("subprocess.run", return_value=_proc(1, stderr="forbidden")) as mock_run,
+        ):
+            _add_bot_collaborator("owner/repo")
         assert mock_run.call_count == 1  # PUT only; no invitation calls
 
     def test_put_strips_gh_token_from_env(self) -> None:
@@ -127,9 +137,11 @@ class TestAddBotCollaborator:
                 return _proc(0)
             return _proc(0, "[]")
 
-        with patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "bot-tok", "GH_TOKEN": "owner-tok"}):
-            with patch("subprocess.run", side_effect=fake_run):
-                _add_bot_collaborator("owner/repo")
+        with (
+            patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "bot-tok", "GH_TOKEN": "owner-tok"}),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
+            _add_bot_collaborator("owner/repo")
 
         assert "GH_TOKEN" not in captured_env
 
@@ -138,11 +150,13 @@ class TestAddBotCollaborator:
 
         invite_json = json.dumps([{"id": 10, "repository": {"full_name": "owner/repo"}}])
         responses = [
-            _proc(0),               # PUT
+            _proc(0),  # PUT
             _proc(0, invite_json),  # list
-            _proc(0, "204"),        # accept
+            _proc(0, "204"),  # accept
         ]
-        with patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "tok"}):
-            with patch("subprocess.run", side_effect=responses) as mock_run:
-                _add_bot_collaborator("owner/repo")
+        with (
+            patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "tok"}),
+            patch("subprocess.run", side_effect=responses) as mock_run,
+        ):
+            _add_bot_collaborator("owner/repo")
         assert mock_run.call_count == 3

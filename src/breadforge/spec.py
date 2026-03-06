@@ -250,6 +250,55 @@ def parse_spec(path: Path) -> MilestoneSpec:
     )
 
 
+def parse_validation_assertions(spec_markdown: str) -> list[str]:
+    """Extract ordered assertion strings from a spec's Validation section.
+
+    Locates the ``## Validation`` section, finds the first fenced code block
+    opened with ` ```validate `, and returns the content lines after stripping
+    blank lines and comment lines (those starting with ``#``).
+
+    Returns an empty list when no Validation section or no ``validate`` block
+    is found.
+    """
+    lines = spec_markdown.splitlines()
+
+    # Advance to the ## Validation section.
+    in_validation_section = False
+    validation_start = None
+    for i, line in enumerate(lines):
+        if line.startswith("## "):
+            section = line[3:].strip()
+            if section.lower() == "validation":
+                in_validation_section = True
+                validation_start = i + 1
+            elif in_validation_section:
+                # A new ## section ends the Validation section.
+                break
+
+    if not in_validation_section or validation_start is None:
+        return []
+
+    # Find the first ```validate fenced block within the section.
+    section_lines = lines[validation_start:]
+    block_lines: list[str] = []
+    in_block = False
+    for line in section_lines:
+        stripped = line.strip()
+        if not in_block:
+            if stripped.startswith("```validate"):
+                in_block = True
+            elif stripped.startswith("## "):
+                # Left the Validation section without finding a block.
+                break
+        else:
+            if stripped == "```":
+                break
+            block_lines.append(line)
+
+    # Strip blank lines and comment lines.
+    return [line for line in block_lines if line.strip() and not line.strip().startswith("#")]
+
+
 def validate_spec(spec_text: str) -> list[str]:
     """Return list of validation errors.
 

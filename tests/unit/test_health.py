@@ -6,8 +6,6 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from breadforge.health import CheckStatus, _check_bot_collaborator
 
 
@@ -29,14 +27,12 @@ class TestCheckBotCollaborator:
         assert mock_run.call_count == 1  # only the status check
 
     def test_not_collaborator_add_succeeds_invitation_accepted(self) -> None:
-        invite_json = json.dumps(
-            [{"id": 7, "repository": {"full_name": "owner/repo"}}]
-        )
+        invite_json = json.dumps([{"id": 7, "repository": {"full_name": "owner/repo"}}])
         responses = [
-            _proc(1),               # collaborator check: not a member
-            _proc(0),               # PUT: add succeeds
+            _proc(1),  # collaborator check: not a member
+            _proc(0),  # PUT: add succeeds
             _proc(0, invite_json),  # list invitations
-            _proc(0, "204"),        # accept invitation
+            _proc(0, "204"),  # accept invitation
         ]
         with patch("subprocess.run", side_effect=responses):
             result = _check_bot_collaborator("owner/repo", "tok")
@@ -45,7 +41,7 @@ class TestCheckBotCollaborator:
 
     def test_not_collaborator_add_fails(self) -> None:
         responses = [
-            _proc(1),                              # collaborator check fails
+            _proc(1),  # collaborator check fails
             _proc(1, stderr="permission denied"),  # PUT fails
         ]
         with patch("subprocess.run", side_effect=responses):
@@ -88,9 +84,7 @@ class TestCheckBotCollaborator:
         assert "0 invitation" in result.message
 
     def test_invitation_for_other_repo_not_accepted(self) -> None:
-        invite_json = json.dumps(
-            [{"id": 99, "repository": {"full_name": "other/repo"}}]
-        )
+        invite_json = json.dumps([{"id": 99, "repository": {"full_name": "other/repo"}}])
         responses = [
             _proc(1),
             _proc(0),
@@ -104,10 +98,12 @@ class TestCheckBotCollaborator:
         assert mock_run.call_count == 3  # check + PUT + list; no PATCH
 
     def test_multiple_invitations_all_accepted(self) -> None:
-        invite_json = json.dumps([
-            {"id": 1, "repository": {"full_name": "owner/repo"}},
-            {"id": 2, "repository": {"full_name": "owner/repo"}},
-        ])
+        invite_json = json.dumps(
+            [
+                {"id": 1, "repository": {"full_name": "owner/repo"}},
+                {"id": 2, "repository": {"full_name": "owner/repo"}},
+            ]
+        )
         responses = [
             _proc(1),
             _proc(0),
@@ -121,9 +117,7 @@ class TestCheckBotCollaborator:
         assert "2 invitation" in result.message
 
     def test_acceptance_non_204_returns_warn(self) -> None:
-        invite_json = json.dumps(
-            [{"id": 1, "repository": {"full_name": "owner/repo"}}]
-        )
+        invite_json = json.dumps([{"id": 1, "repository": {"full_name": "owner/repo"}}])
         responses = [
             _proc(1),
             _proc(0),
@@ -150,9 +144,11 @@ class TestCheckBotCollaborator:
                 return _proc(0)
             return _proc(0, "[]")  # list invitations
 
-        with patch("subprocess.run", side_effect=fake_run):
-            with patch.dict(os.environ, {"GH_TOKEN": "owner-token"}):
-                _check_bot_collaborator("owner/repo", "bot-token")
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch.dict(os.environ, {"GH_TOKEN": "owner-token"}),
+        ):
+            _check_bot_collaborator("owner/repo", "bot-token")
 
         assert call_index >= 2, "PUT was never called"
         assert "GH_TOKEN" not in captured_env
@@ -179,11 +175,17 @@ class TestBotTokenValidation:
                 return _proc(0)
             return _proc(0)
 
-        env = {"BREADFORGE_GH_TOKEN": token, "ANTHROPIC_API_KEY": "x"} if token else {"ANTHROPIC_API_KEY": "x"}
-        with patch("subprocess.run", side_effect=fake_run):
-            with patch("shutil.which", return_value="/usr/bin/claude"):
-                with patch.dict(os.environ, env, clear=True):
-                    return run_health_checks("owner/repo")
+        env = (
+            {"BREADFORGE_GH_TOKEN": token, "ANTHROPIC_API_KEY": "x"}
+            if token
+            else {"ANTHROPIC_API_KEY": "x"}
+        )
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("shutil.which", return_value="/usr/bin/claude"),
+            patch.dict(os.environ, env, clear=True),
+        ):
+            return run_health_checks("owner/repo")
 
     def test_valid_token_passes(self) -> None:
         report = self._run_checks("valid-token", "200")

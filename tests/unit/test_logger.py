@@ -54,7 +54,13 @@ class TestLoggerEvents:
         assert "ts" in r
 
     def test_dispatch(self, logger: Logger, log_path: Path) -> None:
-        logger.dispatch(issue_number=10, branch="10-feat", model="claude-sonnet-4-6", tier="build", upgraded=False)
+        logger.dispatch(
+            issue_number=10,
+            branch="10-feat",
+            model="claude-sonnet-4-6",
+            tier="build",
+            upgraded=False,
+        )
         records = _read_records(log_path)
         r = records[0]
         assert r["event"] == "dispatch"
@@ -72,7 +78,9 @@ class TestLoggerEvents:
         assert r["upgraded"] is False
 
     def test_agent_complete(self, logger: Logger, log_path: Path) -> None:
-        logger.agent_complete(issue_number=7, branch="7-b", exit_code=0, duration_ms=1234.5, pr_number=42)
+        logger.agent_complete(
+            issue_number=7, branch="7-b", exit_code=0, duration_ms=1234.5, pr_number=42
+        )
         records = _read_records(log_path)
         r = records[0]
         assert r["event"] == "agent_complete"
@@ -126,7 +134,9 @@ class TestLoggerEvents:
         assert r["issue_number"] is None
 
     def test_repair(self, logger: Logger, log_path: Path) -> None:
-        logger.repair(anomaly_id="stuck-10-999", issue_number=10, action="re-dispatch", pr_number=55)
+        logger.repair(
+            anomaly_id="stuck-10-999", issue_number=10, action="re-dispatch", pr_number=55
+        )
         r = _read_records(log_path)[0]
         assert r["event"] == "repair"
         assert r["action"] == "re-dispatch"

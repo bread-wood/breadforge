@@ -205,6 +205,7 @@ class RollingDispatcher:
                 return
 
         import re
+
         slug = re.sub(r"[^a-z0-9-]", "-", bead.title[:40].lower()).strip("-")
         slug = re.sub(r"-{2,}", "-", slug)
         branch = f"{issue_number}-{slug}"

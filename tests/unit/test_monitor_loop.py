@@ -45,8 +45,8 @@ class TestRunMonitor:
     ) -> None:
         import json
         from datetime import UTC, datetime, timedelta
-        from breadforge.beads.types import WorkBead
 
+        from breadforge.beads.types import WorkBead
         from breadforge.monitor.loop import run_monitor
 
         # Inject a stuck issue
@@ -60,12 +60,13 @@ class TestRunMonitor:
         repair_agent = AsyncMock()
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout="[]")
-            with patch("breadforge.monitor.loop._repair_auto", repair_auto):
-                with patch("breadforge.monitor.loop._repair_agent", repair_agent):
-                    asyncio.run(run_monitor(
-                        store, config, logger,
-                        once=True, dry_run=True, interval_seconds=0
-                    ))
+            with (
+                patch("breadforge.monitor.loop._repair_auto", repair_auto),
+                patch("breadforge.monitor.loop._repair_agent", repair_agent),
+            ):
+                asyncio.run(
+                    run_monitor(store, config, logger, once=True, dry_run=True, interval_seconds=0)
+                )
 
         repair_auto.assert_not_called()
         repair_agent.assert_not_called()
@@ -92,12 +93,13 @@ class TestRunMonitor:
         repair_agent = AsyncMock()
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout="[]")
-            with patch("breadforge.monitor.loop._repair_auto", repair_auto):
-                with patch("breadforge.monitor.loop._repair_agent", repair_agent):
-                    asyncio.run(run_monitor(
-                        store, config, logger,
-                        once=True, dry_run=False, interval_seconds=0
-                    ))
+            with (
+                patch("breadforge.monitor.loop._repair_auto", repair_auto),
+                patch("breadforge.monitor.loop._repair_agent", repair_agent),
+            ):
+                asyncio.run(
+                    run_monitor(store, config, logger, once=True, dry_run=False, interval_seconds=0)
+                )
 
         repair_auto.assert_called_once()
         repair_agent.assert_not_called()
@@ -121,12 +123,13 @@ class TestRunMonitor:
         repair_agent = AsyncMock()
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout="[]")
-            with patch("breadforge.monitor.loop._repair_auto", repair_auto):
-                with patch("breadforge.monitor.loop._repair_agent", repair_agent):
-                    asyncio.run(run_monitor(
-                        store, config, logger,
-                        once=True, dry_run=False, interval_seconds=0
-                    ))
+            with (
+                patch("breadforge.monitor.loop._repair_auto", repair_auto),
+                patch("breadforge.monitor.loop._repair_agent", repair_agent),
+            ):
+                asyncio.run(
+                    run_monitor(store, config, logger, once=True, dry_run=False, interval_seconds=0)
+                )
 
         repair_agent.assert_called_once()
         repair_auto.assert_not_called()
@@ -151,11 +154,17 @@ class TestRunMonitor:
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout="[]")
             with patch("breadforge.monitor.loop._repair_agent", repair_agent):
-                asyncio.run(run_monitor(
-                    store, config, logger,
-                    once=True, dry_run=False,
-                    max_repair_attempts=3, interval_seconds=0
-                ))
+                asyncio.run(
+                    run_monitor(
+                        store,
+                        config,
+                        logger,
+                        once=True,
+                        dry_run=False,
+                        max_repair_attempts=3,
+                        interval_seconds=0,
+                    )
+                )
 
         repair_agent.assert_not_called()
 
@@ -165,6 +174,7 @@ class TestRunMonitor:
         """Same kind+issue anomaly already in store should not be added again."""
         import json
         from datetime import UTC, datetime, timedelta
+
         from breadforge.beads.types import WorkBead
         from breadforge.monitor.loop import run_monitor
 
@@ -189,12 +199,13 @@ class TestRunMonitor:
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout="[]")
             with patch("breadforge.monitor.loop._repair_agent", repair_agent):
-                asyncio.run(run_monitor(
-                    store, config, logger,
-                    once=True, dry_run=True, interval_seconds=0
-                ))
+                asyncio.run(
+                    run_monitor(store, config, logger, once=True, dry_run=True, interval_seconds=0)
+                )
 
         # Should only have one anomaly (the existing one), not two
         open_anomalies = astore.list_open()
-        stuck = [a for a in open_anomalies if a.kind == AnomalyKind.STUCK_ISSUE and a.issue_number == 10]
+        stuck = [
+            a for a in open_anomalies if a.kind == AnomalyKind.STUCK_ISSUE and a.issue_number == 10
+        ]
         assert len(stuck) == 1

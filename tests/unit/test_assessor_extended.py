@@ -4,21 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from unittest.mock import AsyncMock, patch
-
-import pytest
 
 from breadforge.agents.assessor import (
     Assessor,
-    ComplexityEstimate,
     ComplexityTier,
-    AllocationResult,
-    assess_from_plan_artifact,
     assess_and_allocate,
+    assess_from_plan_artifact,
 )
 from breadforge.beads.types import PlanArtifact
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,7 +42,9 @@ def make_artifact(
 class TestAssessorEstimate:
     def test_estimate_success(self) -> None:
         assessor = Assessor()
-        response_json = json.dumps({"tier": "medium", "confidence": 0.8, "reasoning": "standard feature"})
+        response_json = json.dumps(
+            {"tier": "medium", "confidence": 0.8, "reasoning": "standard feature"}
+        )
 
         async def fake_call(self_inner, prompt: str) -> str:
             return response_json
@@ -63,7 +59,7 @@ class TestAssessorEstimate:
 
     def test_estimate_with_code_fence_stripped(self) -> None:
         assessor = Assessor()
-        response = "```json\n{\"tier\": \"high\", \"confidence\": 0.9, \"reasoning\": \"complex\"}\n```"
+        response = '```json\n{"tier": "high", "confidence": 0.9, "reasoning": "complex"}\n```'
 
         async def fake_call(self_inner, prompt: str) -> str:
             return response
@@ -153,9 +149,14 @@ class TestAssessorCallLLM:
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch.dict("sys.modules", {"breadmin_llm": None, "breadmin_llm.registry": None, "breadmin_llm.types": None}):
-            with patch("anthropic.AsyncAnthropic", return_value=mock_client):
-                result = asyncio.run(assessor.estimate("Title", "Body"))
+        with (
+            patch.dict(
+                "sys.modules",
+                {"breadmin_llm": None, "breadmin_llm.registry": None, "breadmin_llm.types": None},
+            ),
+            patch("anthropic.AsyncAnthropic", return_value=mock_client),
+        ):
+            result = asyncio.run(assessor.estimate("Title", "Body"))
 
         assert result.tier == ComplexityTier.LOW
 
@@ -238,9 +239,7 @@ class TestAssessFromPlanArtifact:
 class TestAssessAndAllocate:
     def test_env_override_skips_llm(self, monkeypatch) -> None:
         monkeypatch.setenv("BREADFORGE_MODEL", "override-model")
-        alloc, estimate = asyncio.run(
-            assess_and_allocate("Title", "Body")
-        )
+        alloc, estimate = asyncio.run(assess_and_allocate("Title", "Body"))
         assert alloc.model == "override-model"
         assert alloc.overridden is True
         assert estimate.reasoning == "model override — estimation skipped"
