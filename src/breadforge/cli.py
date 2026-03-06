@@ -1734,9 +1734,13 @@ def _build_dashboard() -> Group:
 
 def _launch_dashboard_tui() -> None:
     """Launch the interactive Textual dashboard."""
+    import json as _json
+
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.widgets import Footer, Header, Tree
+    from textual.containers import Container, ScrollableContainer
+    from textual.screen import ModalScreen
+    from textual.widgets import Footer, Header, Static, Tree
     from textual.widgets.tree import TreeNode
 
     _STATE_COLOR = {
@@ -1746,6 +1750,7 @@ def _launch_dashboard_tui() -> None:
         "abandoned": "red",
         "failed": "red",
     }
+    _RETRYABLE = {"abandoned", "failed"}
 
     def _node_label(node: dict) -> str:
         nid = node.get("id", "?")
@@ -1758,6 +1763,98 @@ def _launch_dashboard_tui() -> None:
             cost_str = f"  [dim]${cost['cost_usd']:.4f}[/dim]"
         return f"[{color}]{state:10}[/{color}]  [{('bold' if ntype == 'build' else 'dim')}]{nid}[/]  [dim]{ntype}[/dim]{cost_str}"
 
+    def _bead_path(repo: str, node_id: str) -> Path:
+        parts = repo.split("/", 1)
+        return (
+            Path.home()
+            / ".breadforge"
+            / "beads"
+            / parts[0]
+            / parts[1]
+            / "graph"
+            / f"{node_id}.json"
+        )
+
+    class NodeDetailScreen(ModalScreen):
+        BINDINGS = [
+            Binding("escape", "dismiss", "Close"),
+            Binding("q", "dismiss", "Close"),
+        ]
+        CSS = """
+        NodeDetailScreen {
+            align: center middle;
+        }
+        #dialog {
+            width: 90%;
+            max-height: 80%;
+            border: thick $accent;
+            background: $surface;
+            padding: 1 2;
+        }
+        #dialog-title {
+            text-style: bold;
+            color: $accent;
+            padding-bottom: 1;
+        }
+        #dialog-content {
+            height: auto;
+            max-height: 1fr;
+            overflow-y: auto;
+        }
+        #dialog-footer {
+            color: $text-muted;
+            padding-top: 1;
+        }
+        """
+
+        def __init__(self, node: dict, repo: str) -> None:
+            super().__init__()
+            self._node = node
+            self._repo = repo
+
+        def compose(self) -> ComposeResult:
+            node = self._node
+            nid = node.get("id", "?")
+            state = node.get("state", "?")
+            ntype = node.get("type", "?")
+            color = _STATE_COLOR.get(state, "white")
+
+            lines: list[str] = []
+            lines.append(f"[bold]Repo:[/bold]  {self._repo}")
+            lines.append(f"[bold]ID:[/bold]    {nid}")
+            lines.append(f"[bold]Type:[/bold]  {ntype}")
+            lines.append(f"[bold]State:[/bold] [{color}]{state}[/{color}]")
+
+            for ts_key in ("created_at", "started_at", "finished_at"):
+                if node.get(ts_key):
+                    lines.append(f"[bold]{ts_key}:[/bold] {node[ts_key]}")
+
+            ctx = node.get("context") or {}
+            if ctx:
+                lines.append("")
+                lines.append("[bold cyan]Context[/bold cyan]")
+                lines.append(_json.dumps(ctx, indent=2))
+
+            out = node.get("output") or {}
+            if out:
+                lines.append("")
+                lines.append("[bold cyan]Output[/bold cyan]")
+                lines.append(_json.dumps(out, indent=2))
+
+            retry_hint = ""
+            if state in _RETRYABLE:
+                retry_hint = "  [bold yellow]x[/bold yellow] Retry"
+
+            yield Container(
+                Static(f"Node — {nid}", id="dialog-title"),
+                ScrollableContainer(Static("\n".join(lines)), id="dialog-content"),
+                Static(f"[dim]Esc / q — close{retry_hint}[/dim]", id="dialog-footer"),
+                id="dialog",
+            )
+
+        def action_dismiss(self) -> None:
+            self.dismiss()
+
     class DashboardApp(App):
         TITLE = "breadforge dashboard"
         BINDINGS = [
@@ -1765,6 +1862,8 @@ def _launch_dashboard_tui() -> None:
             Binding("r", "refresh", "Refresh"),
             Binding("space", "toggle_node", "Expand/Collapse", show=True),
             Binding("enter", "toggle_node", "Expand/Collapse", show=False),
+            Binding("d", "diagnose", "Diagnose", show=True),
+            Binding("x", "retry", "Retry", show=True),
         ]
         CSS = """
         Tree {
@@ -1805,7 +1904,6 @@ def _launch_dashboard_tui() -> None:
                 )
                 ms_node = repo_node.add(ms_label, expand=False)
 
-                # Sort nodes: plan first, then build, merge, readme, validate
                 _ORDER = {
                     "plan": 0,
                     "research": 1,
@@ -1819,7 +1917,14 @@ def _launch_dashboard_tui() -> None:
                     nodes, key=lambda n: (_ORDER.get(n.get("type", ""), 9), n.get("id", ""))
                 )
                 for n in sorted_nodes:
-                    ms_node.add_leaf(_node_label(n))
+                    ms_node.add_leaf(_node_label(n), data={"node": n, "repo": repo})
+
+        def _cursor_node_data(self) -> dict | None:
+            tree: Tree = self.query_one("#tree", Tree)
+            cursor = tree.cursor_node
+            if cursor is not None and cursor.is_leaf and isinstance(cursor.data, dict):
+                return cursor.data
+            return None
 
         def action_refresh(self) -> None:
             self._populate()
@@ -1830,6 +1935,43 @@ def _launch_dashboard_tui() -> None:
             node = tree.cursor_node
             if node is not None and not node.is_leaf:
                 node.toggle()
+
+        def action_diagnose(self) -> None:
+            d = self._cursor_node_data()
+            if d is None:
+                self.notify("Move cursor to a node leaf first", severity="warning")
+                return
+            self.push_screen(NodeDetailScreen(d["node"], d["repo"]))
+
+        def action_retry(self) -> None:
+            d = self._cursor_node_data()
+            if d is None:
+                self.notify("Move cursor to a node leaf first", severity="warning")
+                return
+            node = d["node"]
+            state = node.get("state", "")
+            if state not in _RETRYABLE:
+                self.notify(
+                    f"Cannot retry — state is '{state}' (only abandoned/failed)", severity="warning"
+                )
+                return
+            nid = node.get("id", "")
+            bp = _bead_path(d["repo"], nid)
+            if not bp.exists():
+                self.notify(f"Bead file not found: {bp}", severity="error")
+                return
+            try:
+                data = _json.loads(bp.read_text())
+                data["state"] = "pending"
+                data.pop("started_at", None)
+                data.pop("finished_at", None)
+                if isinstance(data.get("output"), dict):
+                    data["output"].pop("error", None)
+                bp.write_text(_json.dumps(data, indent=2))
+                self.notify(f"[green]Reset {nid} → pending[/green]")
+                self._populate()
+            except Exception as e:
+                self.notify(f"Retry failed: {e}", severity="error")
 
     DashboardApp().run()
 
