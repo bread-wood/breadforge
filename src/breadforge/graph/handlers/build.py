@@ -146,8 +146,7 @@ def _setup_workspace(
             cwd=workspace,
         )
         subprocess.run(
-            ["git", "commit", "-m", f"chore: set breadforge scope for {branch}",
-             "--no-verify"],
+            ["git", "commit", "-m", f"chore: set breadforge scope for {branch}", "--no-verify"],
             capture_output=True,
             cwd=workspace,
         )

@@ -326,7 +326,6 @@ class TestGraphExecutor:
 
     def test_rerun_retries_abandoned_nodes(self, config: Config, store: BeadStore) -> None:
         """On a second run, previously abandoned build nodes are re-dispatched."""
-        from breadforge.beads import GraphNode as StoredNode
 
         # Simulate a previous run: plan done, build abandoned
         plan_node_data = make_node("v1-plan", type="plan")
@@ -431,6 +430,7 @@ class TestGraphExecutor:
             return NodeResult(success=False, error="failed")
 
         from unittest.mock import MagicMock
+
         build_handler = MagicMock()
         build_handler.execute = execute_build
         build_handler.recover = MagicMock(return_value=None)

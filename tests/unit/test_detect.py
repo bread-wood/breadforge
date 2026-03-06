@@ -18,7 +18,9 @@ def store(tmp_path: Path) -> BeadStore:
     return BeadStore(tmp_path / "beads", "owner/repo")
 
 
-def _write_old_work_bead(store: BeadStore, issue_number: int, age_minutes: int, pr_number=None) -> None:
+def _write_old_work_bead(
+    store: BeadStore, issue_number: int, age_minutes: int, pr_number=None
+) -> None:
     """Write a work bead with updated_at backdated by age_minutes."""
     bead = WorkBead(issue_number=issue_number, repo="owner/repo", title=f"Issue {issue_number}")
     bead.state = "claimed"  # type: ignore
@@ -28,8 +30,15 @@ def _write_old_work_bead(store: BeadStore, issue_number: int, age_minutes: int, 
     (store._work_dir / f"{issue_number}.json").write_text(json.dumps(data))
 
 
-def _write_old_pr_bead(store: BeadStore, pr_number: int, issue_number: int, age_minutes: int, state: str = "open") -> None:
-    bead = PRBead(pr_number=pr_number, repo="owner/repo", issue_number=issue_number, branch=f"{issue_number}-branch")
+def _write_old_pr_bead(
+    store: BeadStore, pr_number: int, issue_number: int, age_minutes: int, state: str = "open"
+) -> None:
+    bead = PRBead(
+        pr_number=pr_number,
+        repo="owner/repo",
+        issue_number=issue_number,
+        branch=f"{issue_number}-branch",
+    )
     bead.state = state  # type: ignore
     data = bead.model_dump(mode="json")
     data["updated_at"] = (datetime.now(UTC) - timedelta(minutes=age_minutes)).isoformat()
@@ -99,11 +108,13 @@ class TestStuckIssueDetection:
 class TestZombiePRDetection:
     def test_detects_zombie_pr_checkrun_failure(self, store: BeadStore) -> None:
         _write_old_pr_bead(store, pr_number=100, issue_number=1, age_minutes=90)
-        ci_data = json.dumps({
-            "statusCheckRollup": [
-                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}
-            ]
-        })
+        ci_data = json.dumps(
+            {
+                "statusCheckRollup": [
+                    {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}
+                ]
+            }
+        )
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout=ci_data)
             anomalies = _detect_anomalies(store, "owner/repo", zombie_minutes=60)
@@ -113,11 +124,13 @@ class TestZombiePRDetection:
 
     def test_detects_zombie_pr_timed_out(self, store: BeadStore) -> None:
         _write_old_pr_bead(store, pr_number=101, issue_number=2, age_minutes=90)
-        ci_data = json.dumps({
-            "statusCheckRollup": [
-                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "TIMED_OUT"}
-            ]
-        })
+        ci_data = json.dumps(
+            {
+                "statusCheckRollup": [
+                    {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "TIMED_OUT"}
+                ]
+            }
+        )
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout=ci_data)
             anomalies = _detect_anomalies(store, "owner/repo", zombie_minutes=60)
@@ -126,9 +139,7 @@ class TestZombiePRDetection:
 
     def test_detects_zombie_pr_status_context_failure(self, store: BeadStore) -> None:
         _write_old_pr_bead(store, pr_number=102, issue_number=3, age_minutes=90)
-        ci_data = json.dumps({
-            "statusCheckRollup": [{"state": "FAILURE"}]
-        })
+        ci_data = json.dumps({"statusCheckRollup": [{"state": "FAILURE"}]})
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout=ci_data)
             anomalies = _detect_anomalies(store, "owner/repo", zombie_minutes=60)
@@ -159,11 +170,13 @@ class TestZombiePRDetection:
 
     def test_zombie_passing_ci_not_flagged(self, store: BeadStore) -> None:
         _write_old_pr_bead(store, pr_number=203, issue_number=8, age_minutes=200)
-        ci_data = json.dumps({
-            "statusCheckRollup": [
-                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}
-            ]
-        })
+        ci_data = json.dumps(
+            {
+                "statusCheckRollup": [
+                    {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ]
+            }
+        )
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout=ci_data)
             anomalies = _detect_anomalies(store, "owner/repo", zombie_minutes=60)
@@ -190,11 +203,17 @@ class TestZombiePRDetection:
 
     def test_startup_failure_is_zombie(self, store: BeadStore) -> None:
         _write_old_pr_bead(store, pr_number=206, issue_number=11, age_minutes=200)
-        ci_data = json.dumps({
-            "statusCheckRollup": [
-                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "STARTUP_FAILURE"}
-            ]
-        })
+        ci_data = json.dumps(
+            {
+                "statusCheckRollup": [
+                    {
+                        "__typename": "CheckRun",
+                        "status": "COMPLETED",
+                        "conclusion": "STARTUP_FAILURE",
+                    }
+                ]
+            }
+        )
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=0, stdout=ci_data)
             anomalies = _detect_anomalies(store, "owner/repo", zombie_minutes=60)
@@ -212,7 +231,9 @@ class TestConflictPRDetection:
         bead = PRBead(pr_number=300, repo="owner/repo", issue_number=20, branch="20-b")
         store.write_pr_bead(bead)
         with patch("breadforge.monitor.detect._gh") as mock_gh:
-            mock_gh.return_value = MagicMock(returncode=0, stdout=json.dumps({"mergeable": "CONFLICTING"}))
+            mock_gh.return_value = MagicMock(
+                returncode=0, stdout=json.dumps({"mergeable": "CONFLICTING"})
+            )
             anomalies = _detect_anomalies(store, "owner/repo")
         conflict = [a for a in anomalies if a.kind == AnomalyKind.CONFLICT_PR]
         assert len(conflict) == 1
@@ -223,9 +244,13 @@ class TestConflictPRDetection:
         bead = PRBead(pr_number=301, repo="owner/repo", issue_number=21, branch="21-b")
         store.write_pr_bead(bead)
         with patch("breadforge.monitor.detect._gh") as mock_gh:
-            mock_gh.return_value = MagicMock(returncode=0, stdout=json.dumps({"mergeable": "MERGEABLE"}))
+            mock_gh.return_value = MagicMock(
+                returncode=0, stdout=json.dumps({"mergeable": "MERGEABLE"})
+            )
             anomalies = _detect_anomalies(store, "owner/repo")
-        conflict = [a for a in anomalies if a.kind == AnomalyKind.CONFLICT_PR and a.pr_number == 301]
+        conflict = [
+            a for a in anomalies if a.kind == AnomalyKind.CONFLICT_PR and a.pr_number == 301
+        ]
         assert len(conflict) == 0
 
     def test_already_conflict_state_skipped(self, store: BeadStore) -> None:
@@ -233,9 +258,13 @@ class TestConflictPRDetection:
         bead.state = "conflict"  # type: ignore
         store.write_pr_bead(bead)
         with patch("breadforge.monitor.detect._gh") as mock_gh:
-            mock_gh.return_value = MagicMock(returncode=0, stdout=json.dumps({"mergeable": "CONFLICTING"}))
+            mock_gh.return_value = MagicMock(
+                returncode=0, stdout=json.dumps({"mergeable": "CONFLICTING"})
+            )
             anomalies = _detect_anomalies(store, "owner/repo")
-        conflict = [a for a in anomalies if a.kind == AnomalyKind.CONFLICT_PR and a.pr_number == 302]
+        conflict = [
+            a for a in anomalies if a.kind == AnomalyKind.CONFLICT_PR and a.pr_number == 302
+        ]
         assert len(conflict) == 0
 
     def test_merged_pr_skipped_for_conflict(self, store: BeadStore) -> None:
@@ -243,9 +272,13 @@ class TestConflictPRDetection:
         bead.state = "merged"  # type: ignore
         store.write_pr_bead(bead)
         with patch("breadforge.monitor.detect._gh") as mock_gh:
-            mock_gh.return_value = MagicMock(returncode=0, stdout=json.dumps({"mergeable": "CONFLICTING"}))
+            mock_gh.return_value = MagicMock(
+                returncode=0, stdout=json.dumps({"mergeable": "CONFLICTING"})
+            )
             anomalies = _detect_anomalies(store, "owner/repo")
-        conflict = [a for a in anomalies if a.kind == AnomalyKind.CONFLICT_PR and a.pr_number == 303]
+        conflict = [
+            a for a in anomalies if a.kind == AnomalyKind.CONFLICT_PR and a.pr_number == 303
+        ]
         assert len(conflict) == 0
 
     def test_conflict_gh_failure_skipped(self, store: BeadStore) -> None:
@@ -254,7 +287,9 @@ class TestConflictPRDetection:
         with patch("breadforge.monitor.detect._gh") as mock_gh:
             mock_gh.return_value = MagicMock(returncode=1, stdout="")
             anomalies = _detect_anomalies(store, "owner/repo")
-        conflict = [a for a in anomalies if a.kind == AnomalyKind.CONFLICT_PR and a.pr_number == 304]
+        conflict = [
+            a for a in anomalies if a.kind == AnomalyKind.CONFLICT_PR and a.pr_number == 304
+        ]
         assert len(conflict) == 0
 
 

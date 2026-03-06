@@ -11,10 +11,13 @@ import pytest
 
 from breadforge.beads import BeadStore, GraphNode
 from breadforge.config import Config
-from breadforge.graph.executor import ExecutionGraph, GraphExecutor, _add_overlap_edges, make_handlers
+from breadforge.graph.executor import (
+    ExecutionGraph,
+    GraphExecutor,
+    make_handlers,
+)
 from breadforge.graph.node import BackendRouter, NodeResult
 from breadforge.logger import Logger
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -50,7 +53,12 @@ def make_node(
     )
 
 
-def mock_handler(success: bool = True, output: dict | None = None, error: str | None = None, abandon: bool = False):
+def mock_handler(
+    success: bool = True,
+    output: dict | None = None,
+    error: str | None = None,
+    abandon: bool = False,
+):
     handler = AsyncMock()
     handler.execute = AsyncMock(
         return_value=NodeResult(success=success, output=output or {}, error=error, abandon=abandon)
@@ -357,7 +365,9 @@ class TestRecoverRunningNodes:
         # Node re-dispatched → fails (no handler) → abandoned
         assert "build-x" in result.abandoned
 
-    def test_recover_running_failure_result_sets_retry_count(self, config: Config, store: BeadStore) -> None:
+    def test_recover_running_failure_result_sets_retry_count(
+        self, config: Config, store: BeadStore
+    ) -> None:
         """If handler.recover() returns failure, retry_count is inherited from stored value."""
         node = make_node("build-a")
         node.state = "running"  # type: ignore[assignment]
@@ -471,7 +481,9 @@ class TestNoHandler:
 
 
 class TestRestoreAbandonedWritesPending:
-    def test_abandoned_node_reset_to_pending_in_store(self, config: Config, store: BeadStore) -> None:
+    def test_abandoned_node_reset_to_pending_in_store(
+        self, config: Config, store: BeadStore
+    ) -> None:
         """After _restore_from_store, abandoned nodes should be written back as pending."""
         node = make_node("build-a")
         node.state = "abandoned"  # type: ignore[assignment]
@@ -529,7 +541,9 @@ class TestRestoreAbandonedWritesPending:
         # Build was dispatched (not skipped, not restored)
         assert build_handler.execute.call_count == 1
 
-    def test_plan_expansion_restores_done_build_from_store(self, config: Config, store: BeadStore) -> None:
+    def test_plan_expansion_restores_done_build_from_store(
+        self, config: Config, store: BeadStore
+    ) -> None:
         """Plan handler returns new_nodes; if a build node is already done in store, skip it."""
         new_node_data = {
             "id": "build-core",
@@ -565,7 +579,9 @@ class TestRestoreAbandonedWritesPending:
         assert "build-core" in result.done
         assert build_handler.execute.call_count == 0  # already done, not re-dispatched
 
-    def test_plan_expansion_restores_abandoned_build_from_store(self, config: Config, store: BeadStore) -> None:
+    def test_plan_expansion_restores_abandoned_build_from_store(
+        self, config: Config, store: BeadStore
+    ) -> None:
         """Plan handler returns new_nodes; abandoned build from store counted in abandoned."""
         new_node_data = {
             "id": "build-fail",
@@ -599,7 +615,9 @@ class TestRestoreAbandonedWritesPending:
         assert "build-fail" in result.abandoned
         assert build_handler.execute.call_count == 0  # was abandoned, not re-dispatched
 
-    def test_abandoned_node_shows_pending_after_restore(self, config: Config, store: BeadStore) -> None:
+    def test_abandoned_node_shows_pending_after_restore(
+        self, config: Config, store: BeadStore
+    ) -> None:
         """The bead store should NOT show abandoned mid-run for a retried node."""
         node = make_node("build-a")
         node.state = "abandoned"  # type: ignore[assignment]
@@ -618,6 +636,7 @@ class TestRestoreAbandonedWritesPending:
                 states_seen.append(n.state)
 
         import unittest.mock as um
+
         with um.patch.object(GraphExecutor, "_restore_from_store", patched_restore):
             executor = GraphExecutor(
                 config=config,
@@ -629,7 +648,9 @@ class TestRestoreAbandonedWritesPending:
             graph = ExecutionGraph([make_node("build-a")])
             asyncio.run(executor.run(graph))
 
-        assert "pending" in states_seen, f"Expected pending in store after restore, got {states_seen}"
+        assert "pending" in states_seen, (
+            f"Expected pending in store after restore, got {states_seen}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -712,7 +733,16 @@ class TestMakeHandlersFactory:
     def test_returns_all_expected_types(self, tmp_path: Path) -> None:
         store = BeadStore(tmp_path / "beads", "owner/repo")
         handlers = make_handlers(store=store)
-        for expected in ("plan", "research", "build", "merge", "readme", "wait", "consensus", "design_doc"):
+        for expected in (
+            "plan",
+            "research",
+            "build",
+            "merge",
+            "readme",
+            "wait",
+            "consensus",
+            "design_doc",
+        ):
             assert expected in handlers, f"Missing handler for type: {expected}"
 
     def test_returns_handlers_without_store(self) -> None:

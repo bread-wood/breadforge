@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from breadforge.spec import KeyUnknown, MilestoneSpec, ModuleSpec, parse_campaign, parse_spec, validate_spec
+from breadforge.spec import (
+    parse_campaign,
+    parse_spec,
+)
 
 
 def write_spec(tmp_path: Path, name: str, content: str) -> Path:
@@ -121,9 +122,7 @@ class TestScopeSection:
         assert any("[constraint]" in s and "HTTP" in s for s in spec.scope_included)
 
     def test_scope_included_subsection(self, tmp_path: Path) -> None:
-        content = (
-            "# P v1.0.0 — F\n\n## Scope\n### Included\n- Thing A\n### Excluded\n- Thing B\n"
-        )
+        content = "# P v1.0.0 — F\n\n## Scope\n### Included\n- Thing A\n### Excluded\n- Thing B\n"
         spec = parse_spec(write_spec(tmp_path, "v1.0.0-f.md", content))
         assert "Thing A" in spec.scope_included
         assert "Thing B" in spec.scope_excluded
@@ -166,10 +165,7 @@ class TestOpenQuestions:
 class TestBlockquoteSkip:
     def test_blockquote_lines_skipped(self, tmp_path: Path) -> None:
         content = (
-            "# P v1.0.0 — F\n\n"
-            "> This is a blockquote — metadata\n"
-            "## Overview\n"
-            "Actual overview.\n"
+            "# P v1.0.0 — F\n\n> This is a blockquote — metadata\n## Overview\nActual overview.\n"
         )
         spec = parse_spec(write_spec(tmp_path, "v1.0.0-f.md", content))
         assert "blockquote" not in spec.overview

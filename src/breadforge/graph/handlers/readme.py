@@ -99,13 +99,18 @@ class ReadmeHandler:
                 f"- `{m}`: {', '.join(f'`{f}`' for f in files_per_module.get(m, []))}"
                 for m in modules
             )
-            summary = (
-                f"**`{milestone}` complete.** All modules built and merged.\n\n"
-                f"{module_lines}"
-            )
+            summary = f"**`{milestone}` complete.** All modules built and merged.\n\n{module_lines}"
             subprocess.run(
-                ["gh", "issue", "close", str(milestone_issue_number), "--repo", repo,
-                 "--comment", summary],
+                [
+                    "gh",
+                    "issue",
+                    "close",
+                    str(milestone_issue_number),
+                    "--repo",
+                    repo,
+                    "--comment",
+                    summary,
+                ],
                 capture_output=True,
                 text=True,
             )

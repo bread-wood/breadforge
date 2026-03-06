@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from breadforge.health import CheckResult, CheckStatus, HealthReport, run_health_checks
 
 
@@ -21,42 +19,52 @@ def _proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
 
 class TestHealthReport:
     def test_healthy_when_all_pass(self) -> None:
-        report = HealthReport(checks=[
-            CheckResult("a", CheckStatus.PASS, "ok"),
-            CheckResult("b", CheckStatus.PASS, "ok"),
-        ])
+        report = HealthReport(
+            checks=[
+                CheckResult("a", CheckStatus.PASS, "ok"),
+                CheckResult("b", CheckStatus.PASS, "ok"),
+            ]
+        )
         assert report.healthy is True
 
     def test_healthy_with_warnings(self) -> None:
-        report = HealthReport(checks=[
-            CheckResult("a", CheckStatus.PASS, "ok"),
-            CheckResult("b", CheckStatus.WARN, "careful"),
-        ])
+        report = HealthReport(
+            checks=[
+                CheckResult("a", CheckStatus.PASS, "ok"),
+                CheckResult("b", CheckStatus.WARN, "careful"),
+            ]
+        )
         assert report.healthy is True
 
     def test_not_healthy_with_failure(self) -> None:
-        report = HealthReport(checks=[
-            CheckResult("a", CheckStatus.PASS, "ok"),
-            CheckResult("b", CheckStatus.FAIL, "broken"),
-        ])
+        report = HealthReport(
+            checks=[
+                CheckResult("a", CheckStatus.PASS, "ok"),
+                CheckResult("b", CheckStatus.FAIL, "broken"),
+            ]
+        )
         assert report.healthy is False
 
     def test_fatal_returns_only_fails(self) -> None:
-        report = HealthReport(checks=[
-            CheckResult("a", CheckStatus.PASS, "ok"),
-            CheckResult("b", CheckStatus.FAIL, "broken"),
-            CheckResult("c", CheckStatus.WARN, "careful"),
-        ])
+        report = HealthReport(
+            checks=[
+                CheckResult("a", CheckStatus.PASS, "ok"),
+                CheckResult("b", CheckStatus.FAIL, "broken"),
+                CheckResult("c", CheckStatus.WARN, "careful"),
+            ]
+        )
         fatal = report.fatal
         assert len(fatal) == 1
         assert fatal[0].name == "b"
 
     def test_warnings_returns_only_warns(self) -> None:
-        report = HealthReport(checks=[
-            CheckResult("a", CheckStatus.PASS, "ok"),
-            CheckResult("b", CheckStatus.FAIL, "broken"),
-            CheckResult("c", CheckStatus.WARN, "careful"),
-        ])
+        report = HealthReport(
+            checks=[
+                CheckResult("a", CheckStatus.PASS, "ok"),
+                CheckResult("b", CheckStatus.FAIL, "broken"),
+                CheckResult("c", CheckStatus.WARN, "careful"),
+            ]
+        )
         warns = report.warnings
         assert len(warns) == 1
         assert warns[0].name == "c"
@@ -75,6 +83,7 @@ class TestHealthReport:
 
 def _make_fake_run(*, claude: bool = True, gh_auth: bool = True, repo_ok: bool = True):
     """Factory for fake subprocess.run that controls tool availability."""
+
     def fake_run(cmd, **kwargs):
         cmd_str = " ".join(str(c) for c in cmd)
         if "auth" in cmd_str:
@@ -86,20 +95,34 @@ def _make_fake_run(*, claude: bool = True, gh_auth: bool = True, repo_ok: bool =
         if "collaborators" in cmd_str:
             return _proc(0)  # already collaborator
         return _proc(0)
+
     return fake_run
 
 
 class TestRunHealthChecks:
-    def _run(self, env: dict, *, claude: bool = True, gh: bool = True, git: bool = True,
-             gh_auth: bool = True, repo_ok: bool = True) -> HealthReport:
-        with patch("subprocess.run", side_effect=_make_fake_run(gh_auth=gh_auth, repo_ok=repo_ok)):
-            with patch("shutil.which", side_effect=lambda t: f"/usr/bin/{t}" if (
-                (t == "claude" and claude) or
-                (t == "gh" and gh) or
-                (t == "git" and git)
-            ) else None):
-                with patch.dict(os.environ, env, clear=True):
-                    return run_health_checks("owner/repo")
+    def _run(
+        self,
+        env: dict,
+        *,
+        claude: bool = True,
+        gh: bool = True,
+        git: bool = True,
+        gh_auth: bool = True,
+        repo_ok: bool = True,
+    ) -> HealthReport:
+        with (
+            patch("subprocess.run", side_effect=_make_fake_run(gh_auth=gh_auth, repo_ok=repo_ok)),
+            patch(
+                "shutil.which",
+                side_effect=lambda t: (
+                    f"/usr/bin/{t}"
+                    if ((t == "claude" and claude) or (t == "gh" and gh) or (t == "git" and git))
+                    else None
+                ),
+            ),
+            patch.dict(os.environ, env, clear=True),
+        ):
+            return run_health_checks("owner/repo")
 
     def test_claude_not_found_fails(self) -> None:
         report = self._run(
@@ -162,11 +185,13 @@ class TestRunHealthChecks:
         assert check.status == CheckStatus.WARN
 
     def test_proxy_secret_set_passes(self) -> None:
-        report = self._run({
-            "ANTHROPIC_API_KEY": "x",
-            "BREADFORGE_GH_TOKEN": "tok",
-            "BREADFORGE_PROXY_SECRET": "secret123",
-        })
+        report = self._run(
+            {
+                "ANTHROPIC_API_KEY": "x",
+                "BREADFORGE_GH_TOKEN": "tok",
+                "BREADFORGE_PROXY_SECRET": "secret123",
+            }
+        )
         check = next(c for c in report.checks if c.name == "proxy-secret")
         assert check.status == CheckStatus.PASS
 
@@ -179,10 +204,12 @@ class TestRunHealthChecks:
 class TestNestingGuard:
     def _run_checks(self, extra_env: dict) -> HealthReport:
         env = {"ANTHROPIC_API_KEY": "x", "BREADFORGE_GH_TOKEN": "tok", **extra_env}
-        with patch("subprocess.run", side_effect=_make_fake_run()):
-            with patch("shutil.which", return_value="/usr/bin/tool"):
-                with patch.dict(os.environ, env, clear=True):
-                    return run_health_checks("owner/repo")
+        with (
+            patch("subprocess.run", side_effect=_make_fake_run()),
+            patch("shutil.which", return_value="/usr/bin/tool"),
+            patch.dict(os.environ, env, clear=True),
+        ):
+            return run_health_checks("owner/repo")
 
     def test_nesting_guard_pass_when_clean(self) -> None:
         report = self._run_checks({})
@@ -221,10 +248,14 @@ class TestGhAuthTimeout:
                 return _proc(0)
             return _proc(0, '{"name":"repo"}')
 
-        with patch("subprocess.run", side_effect=fake_run):
-            with patch("shutil.which", return_value="/usr/bin/tool"):
-                with patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "tok", "ANTHROPIC_API_KEY": "x"}, clear=True):
-                    report = run_health_checks("owner/repo")
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("shutil.which", return_value="/usr/bin/tool"),
+            patch.dict(
+                os.environ, {"BREADFORGE_GH_TOKEN": "tok", "ANTHROPIC_API_KEY": "x"}, clear=True
+            ),
+        ):
+            report = run_health_checks("owner/repo")
 
         check = next(c for c in report.checks if c.name == "gh-auth")
         assert check.status == CheckStatus.WARN
@@ -250,10 +281,14 @@ class TestRepoAccessTimeout:
                 return _proc(0)
             return _proc(0)
 
-        with patch("subprocess.run", side_effect=fake_run):
-            with patch("shutil.which", return_value="/usr/bin/tool"):
-                with patch.dict(os.environ, {"BREADFORGE_GH_TOKEN": "tok", "ANTHROPIC_API_KEY": "x"}, clear=True):
-                    report = run_health_checks("owner/repo")
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("shutil.which", return_value="/usr/bin/tool"),
+            patch.dict(
+                os.environ, {"BREADFORGE_GH_TOKEN": "tok", "ANTHROPIC_API_KEY": "x"}, clear=True
+            ),
+        ):
+            report = run_health_checks("owner/repo")
 
         check = next(c for c in report.checks if c.name == "repo-access")
         assert check.status == CheckStatus.WARN

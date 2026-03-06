@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
+
 # Load .env from the current working directory (or parents) at startup,
 # before any config or health checks read os.environ.
 def _load_dotenv() -> None:
@@ -26,20 +27,21 @@ def _load_dotenv() -> None:
                     os.environ.setdefault(key, value)
             break
 
+
 _load_dotenv()
 
 if TYPE_CHECKING:
     from breadforge.graph.executor import ExecutionGraph
 
-import typer
-from rich.console import Console, Group
-from rich.table import Table
+import typer  # noqa: E402
+from rich.console import Console, Group  # noqa: E402
+from rich.table import Table  # noqa: E402
 
-from breadforge.beads import BeadStore
-from breadforge.config import Config, Registry, RepoEntry
-from breadforge.health import run_health_checks
-from breadforge.logger import Logger
-from breadforge.spec import parse_campaign, parse_spec
+from breadforge.beads import BeadStore  # noqa: E402
+from breadforge.config import Config, Registry, RepoEntry  # noqa: E402
+from breadforge.health import run_health_checks  # noqa: E402
+from breadforge.logger import Logger  # noqa: E402
+from breadforge.spec import parse_campaign, parse_spec  # noqa: E402
 
 app = typer.Typer(
     name="breadforge",
@@ -77,7 +79,6 @@ def _require_repo(repo: str | None) -> str:
 
 
 _BREADFORGE_BOT = "yeast-bot"
-
 
 
 _CI_WORKFLOW_TEMPLATE = """\
@@ -213,6 +214,7 @@ def _add_bot_collaborator(repo: str) -> None:
 
     _accept_bot_invitation(repo, token)
     console.print(f"  {_BREADFORGE_BOT} accepted invitation to {repo}")
+
 
 def _install_ci_workflow(repo: str, branch: str = "mainline") -> None:
     """Install a basic CI workflow on *repo* if one does not already exist."""
