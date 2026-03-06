@@ -39,7 +39,7 @@ import typer  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-from breadforge.beads import BeadStore  # noqa: E402
+from breadforge.beads import BeadStore, GraphNode  # noqa: E402
 from breadforge.config import Config, Registry, RepoEntry  # noqa: E402
 from breadforge.health import run_health_checks  # noqa: E402
 from breadforge.logger import Logger  # noqa: E402
@@ -923,6 +923,43 @@ def init(
         raise typer.Exit(1)
 
 
+def _format_validate_state(node: GraphNode) -> str:
+    """Format the state column for a validate node.
+
+    Maps internal node state + output metadata to the canonical display format:
+    - pending   → not yet started
+    - running   → currently executing
+    - passed    → done with no failures
+    - failed(N) → done with N failing assertions
+    """
+    if node.state == "pending":
+        return "pending"
+    if node.state == "running":
+        return "running"
+    if node.state in ("done", "failed"):
+        output = node.output or {}
+        failed_count = output.get("failed_count")
+        if failed_count is not None:
+            n = int(failed_count)
+            if n == 0:
+                return "passed"
+            return f"failed({n})"
+        # Derive from assertions list if failed_count not stored directly
+        assertions = node.context.get("assertions", [])
+        passed = output.get("passed", [])
+        if assertions and passed:
+            n = len(assertions) - len(passed)
+            if n <= 0:
+                return "passed"
+            return f"failed({n})"
+        # Fall back based on node state
+        if node.state == "done":
+            return "passed"
+        return "failed(0)"
+    # abandoned / wont-do etc — show raw state
+    return node.state
+
+
 def _build_status_table(
     store: BeadStore,
     repo: str,
@@ -992,18 +1029,22 @@ def _build_status_table(
         node_table.add_column("State")
         node_table.add_column("Model")
         node_table.add_column("Retries", justify="right")
-        _TYPE_ORDER = {"plan": 0, "research": 1, "build": 2, "merge": 3, "readme": 4}
-        for node in sorted(nodes, key=lambda n: (_TYPE_ORDER.get(n.type, 5), n.id)):
+        _TYPE_ORDER = {"plan": 0, "research": 1, "build": 2, "merge": 3, "readme": 4, "validate": 5}
+        for node in sorted(nodes, key=lambda n: (_TYPE_ORDER.get(n.type, 6), n.id)):
             color = node_colors.get(node.state, "white")
             if node.type == "merge":
                 node_model_display = "[dim]N/A[/dim]"
             else:
                 node_model = (node.output or {}).get("model") or node.assigned_model or ""
                 node_model_display = _model_tier(node_model)
+            if node.type == "validate":
+                state_display = f"[{color}]{_format_validate_state(node)}[/{color}]"
+            else:
+                state_display = f"[{color}]{node.state}[/{color}]"
             node_table.add_row(
                 node.id,
                 node.type,
-                f"[{color}]{node.state}[/{color}]",
+                state_display,
                 node_model_display,
                 str(node.retry_count) if node.retry_count else "",
             )
@@ -1382,7 +1423,9 @@ def repo_list() -> None:
 
 @app.command()
 def reconcile(
-    repo: Annotated[str | None, typer.Option(help="owner/repo — reconcile one repo. Omit for all.")] = None,
+    repo: Annotated[
+        str | None, typer.Option(help="owner/repo — reconcile one repo. Omit for all.")
+    ] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
     """Reconcile bead state against GitHub reality.
@@ -1414,12 +1457,26 @@ def reconcile(
 
     def _branch_merged(repo: str, branch: str) -> bool:
         """True if branch has a merged PR or the branch head is on the default branch."""
-        out = _gh("pr", "list", "--repo", repo, "--head", branch, "--state", "merged",
-                  "--json", "number", "--jq", "length")
+        out = _gh(
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            branch,
+            "--state",
+            "merged",
+            "--json",
+            "number",
+            "--jq",
+            "length",
+        )
         return out == "1" or int(out or "0") > 0
 
     def _default_branch(repo: str) -> str:
-        out = _gh("repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name")
+        out = _gh(
+            "repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"
+        )
         return out or "mainline"
 
     def _ms_prefix(node_id: str) -> str:
@@ -1468,15 +1525,21 @@ def reconcile(
             except Exception:
                 age_minutes = 999  # unknown age — treat as stale
             if age_minutes < 30:
-                console.print(f"  [dim]skip[/dim]    running ({age_minutes:.0f}m < 30m, may be live)  {node['id']}")
+                console.print(
+                    f"  [dim]skip[/dim]    running ({age_minutes:.0f}m < 30m, may be live)  {node['id']}"
+                )
                 continue
             node_file = graph_dir / f"{node['id']}.json"
             if dry_run:
-                console.print(f"  [yellow][dry-run][/yellow] would reset running→pending  {node['id']}  ({age_minutes:.0f}m stale)")
+                console.print(
+                    f"  [yellow][dry-run][/yellow] would reset running→pending  {node['id']}  ({age_minutes:.0f}m stale)"
+                )
             else:
                 node["state"] = "pending"
                 node_file.write_text(_json.dumps(node, indent=2))
-                console.print(f"  [yellow]reset[/yellow]   running→pending  {node['id']}  ({age_minutes:.0f}m stale)")
+                console.print(
+                    f"  [yellow]reset[/yellow]   running→pending  {node['id']}  ({age_minutes:.0f}m stale)"
+                )
             fixed += 1
 
         # --- 2. Abandoned build/merge nodes — check if branch was merged ---
@@ -1507,7 +1570,9 @@ def reconcile(
 
             node_file = graph_dir / f"{node['id']}.json"
             if dry_run:
-                console.print(f"  [yellow][dry-run][/yellow] would mark done  {node['id']}  (branch {branch} merged)")
+                console.print(
+                    f"  [yellow][dry-run][/yellow] would mark done  {node['id']}  (branch {branch} merged)"
+                )
             else:
                 node["state"] = "done"
                 if not isinstance(node.get("output"), dict):
@@ -1531,9 +1596,13 @@ def reconcile(
                         live.append(item)
                     else:
                         if dry_run:
-                            console.print(f"  [yellow][dry-run][/yellow] would remove PR #{item['pr_number']} from queue [{state}]")
+                            console.print(
+                                f"  [yellow][dry-run][/yellow] would remove PR #{item['pr_number']} from queue [{state}]"
+                            )
                         else:
-                            console.print(f"  [dim]queue[/dim]   removed PR #{item['pr_number']} [{state}]")
+                            console.print(
+                                f"  [dim]queue[/dim]   removed PR #{item['pr_number']} [{state}]"
+                            )
                 if not dry_run and len(live) != before:
                     mq["items"] = live
                     mq_path.write_text(_json.dumps(mq, indent=2))
@@ -1572,15 +1641,26 @@ def reconcile(
                 continue
 
             # Check if issue is still open
-            state_out = _gh("issue", "view", str(ms_issue), "--repo", r, "--json", "state", "--jq", ".state")
+            state_out = _gh(
+                "issue", "view", str(ms_issue), "--repo", r, "--json", "state", "--jq", ".state"
+            )
             if state_out.lower() != "open":
                 continue
 
             if dry_run:
-                console.print(f"  [yellow][dry-run][/yellow] would close issue #{ms_issue} ({ms} — all nodes terminal)")
+                console.print(
+                    f"  [yellow][dry-run][/yellow] would close issue #{ms_issue} ({ms} — all nodes terminal)"
+                )
             else:
-                _gh("issue", "close", str(ms_issue), "--repo", r,
-                    "--comment", f"All graph nodes for {ms} are in terminal state. Auto-closed by `breadforge reconcile`.")
+                _gh(
+                    "issue",
+                    "close",
+                    str(ms_issue),
+                    "--repo",
+                    r,
+                    "--comment",
+                    f"All graph nodes for {ms} are in terminal state. Auto-closed by `breadforge reconcile`.",
+                )
                 console.print(f"  [green]closed[/green]  issue #{ms_issue}  ({ms} complete)")
             fixed += 1
 
@@ -1588,7 +1668,10 @@ def reconcile(
             console.print("  [dim]nothing to fix[/dim]")
         total_fixed += fixed
 
-    console.print(f"\n[bold]reconcile done[/bold] — {total_fixed} fix(es) applied" + (" [dry-run]" if dry_run else ""))
+    console.print(
+        f"\n[bold]reconcile done[/bold] — {total_fixed} fix(es) applied"
+        + (" [dry-run]" if dry_run else "")
+    )
 
 
 def _build_dashboard() -> Group:
@@ -1721,7 +1804,9 @@ def dashboard(
 @app.command()
 def drain(
     repo: Annotated[str | None, typer.Option(help="owner/repo to operate on.")] = None,
-    watch: Annotated[bool, typer.Option("--watch", help="Loop until no PRs remain pending.")] = False,
+    watch: Annotated[
+        bool, typer.Option("--watch", help="Loop until no PRs remain pending.")
+    ] = False,
     interval: Annotated[int, typer.Option(help="Seconds between watch loops.")] = 60,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
@@ -1753,9 +1838,18 @@ def drain(
     def _pr_ci_status(pr_number: int) -> str:
         """Returns 'green', 'pending', 'failing', or 'unknown'."""
         r = subprocess.run(
-            ["gh", "pr", "checks", str(pr_number), "--repo", repo,
-             "--json", "name,state,conclusion"],
-            capture_output=True, text=True,
+            [
+                "gh",
+                "pr",
+                "checks",
+                str(pr_number),
+                "--repo",
+                repo,
+                "--json",
+                "name,state,conclusion",
+            ],
+            capture_output=True,
+            text=True,
         )
         if r.returncode != 0:
             return "unknown"
@@ -1781,9 +1875,20 @@ def drain(
         removed = 0
         for item in queue.items:
             r = subprocess.run(
-                ["gh", "pr", "view", str(item.pr_number), "--repo", repo,
-                 "--json", "state", "--jq", ".state"],
-                capture_output=True, text=True,
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    str(item.pr_number),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "state",
+                    "--jq",
+                    ".state",
+                ],
+                capture_output=True,
+                text=True,
             )
             state = r.stdout.strip().lower()
             if state == "open":
@@ -1796,10 +1901,19 @@ def drain(
             console.print(f"  [dim]cleaned {removed} stale queue entries[/dim]")
 
         # 2. Sync open PRs from GitHub that aren't in the queue
-        open_prs = _gh_json(
-            "pr", "list", "--repo", repo, "--state", "open",
-            "--json", "number,headRefName,title",
-        ) or []
+        open_prs = (
+            _gh_json(
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--json",
+                "number,headRefName,title",
+            )
+            or []
+        )
         queued_prs = {item.pr_number for item in queue.items}
         added = 0
         for pr in open_prs:
@@ -1812,18 +1926,22 @@ def drain(
                     if m:
                         issue_number = int(m.group(1))
 
-                queue.items.append(MergeQueueItem(
-                    pr_number=pr_num,
-                    issue_number=issue_number,
-                    branch=pr["headRefName"],
-                ))
-                if not store.read_pr_bead(pr_num):
-                    store.write_pr_bead(PRBead(
+                queue.items.append(
+                    MergeQueueItem(
                         pr_number=pr_num,
-                        repo=repo,
                         issue_number=issue_number,
                         branch=pr["headRefName"],
-                    ))
+                    )
+                )
+                if not store.read_pr_bead(pr_num):
+                    store.write_pr_bead(
+                        PRBead(
+                            pr_number=pr_num,
+                            repo=repo,
+                            issue_number=issue_number,
+                            branch=pr["headRefName"],
+                        )
+                    )
                 added += 1
         if added:
             store.write_merge_queue(queue)
@@ -1838,13 +1956,24 @@ def drain(
 
             if ci == "green":
                 if dry_run:
-                    console.print(f"  [yellow][dry-run][/yellow] would merge PR #{item.pr_number} ({branch})")
+                    console.print(
+                        f"  [yellow][dry-run][/yellow] would merge PR #{item.pr_number} ({branch})"
+                    )
                     merged += 1
                     continue
                 r = subprocess.run(
-                    ["gh", "pr", "merge", str(item.pr_number), "--repo", repo,
-                     "--squash", "--delete-branch"],
-                    capture_output=True, text=True,
+                    [
+                        "gh",
+                        "pr",
+                        "merge",
+                        str(item.pr_number),
+                        "--repo",
+                        repo,
+                        "--squash",
+                        "--delete-branch",
+                    ],
+                    capture_output=True,
+                    text=True,
                 )
                 if r.returncode == 0:
                     console.print(f"  [green]merged[/green] PR #{item.pr_number} ({branch})")
@@ -1863,16 +1992,22 @@ def drain(
                         logger.merge(item.pr_number, item.issue_number, branch)
                     merged += 1
                 else:
-                    console.print(f"  [red]merge failed[/red] PR #{item.pr_number}: {r.stderr[:120]}")
+                    console.print(
+                        f"  [red]merge failed[/red] PR #{item.pr_number}: {r.stderr[:120]}"
+                    )
                     failing += 1
             elif ci == "pending":
-                console.print(f"  [yellow]pending[/yellow]  PR #{item.pr_number} ({branch}) — CI running")
+                console.print(
+                    f"  [yellow]pending[/yellow]  PR #{item.pr_number} ({branch}) — CI running"
+                )
                 pending += 1
             elif ci == "failing":
                 console.print(f"  [red]failing[/red]   PR #{item.pr_number} ({branch}) — CI failed")
                 failing += 1
             else:
-                console.print(f"  [dim]unknown[/dim]   PR #{item.pr_number} ({branch}) — no CI data")
+                console.print(
+                    f"  [dim]unknown[/dim]   PR #{item.pr_number} ({branch}) — no CI data"
+                )
                 pending += 1
 
         return merged, pending, failing
