@@ -375,3 +375,106 @@ def emit_design_doc_node(
         context=context,
         max_retries=2,
     )
+
+
+# ---------------------------------------------------------------------------
+# Validate and bug node emitters
+# ---------------------------------------------------------------------------
+
+
+def emit_validate_node(
+    milestone: str,
+    repo: str,
+    assertions: list[str],
+    depends_on: list[str] | None = None,
+    fix_cycle: int = 0,
+    milestone_issue_number: int | None = None,
+) -> GraphNode:
+    """Create a validate node that runs assertion commands after readme completes.
+
+    The validate node runs each assertion command as a subprocess; a non-zero
+    exit code signals failure.  On failure the validate handler emits one bug
+    node per failed assertion.  On clean pass it closes the milestone tracking
+    issue.
+
+    Args:
+        milestone: The milestone slug (e.g. ``"v1"``).
+        repo: ``owner/repo`` string.
+        assertions: List of shell commands to execute as assertions.
+        depends_on: Node IDs this node depends on (typically the readme node ID).
+        fix_cycle: How many fix cycles have already been attempted.  Starts at 0.
+        milestone_issue_number: GitHub issue number of the milestone tracker issue.
+
+    Returns:
+        A :class:`GraphNode` with type ``"validate"``.
+    """
+    context: dict = {
+        "milestone": milestone,
+        "repo": repo,
+        "assertions": assertions,
+        "fix_cycle": fix_cycle,
+    }
+    if milestone_issue_number is not None:
+        context["milestone_issue_number"] = milestone_issue_number
+    return make_node(
+        id=f"{milestone}-validate",
+        type="validate",
+        depends_on=depends_on or [],
+        context=context,
+        max_retries=3,
+    )
+
+
+def emit_bug_node(
+    milestone: str,
+    repo: str,
+    assertion: str,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    fix_cycle: int = 1,
+    milestone_issue_number: int | None = None,
+    depends_on: list[str] | None = None,
+) -> GraphNode:
+    """Create a bug node that files a GitHub issue and emits a build fix node.
+
+    Bug nodes are emitted by the validate handler when an assertion fails.
+    Each bug node files a GitHub issue with the failure details and emits a
+    build node scoped to fix the issue.
+
+    Args:
+        milestone: The milestone slug.
+        repo: ``owner/repo`` string.
+        assertion: The exact shell command that failed.
+        exit_code: The process exit code from the failing assertion.
+        stdout: Captured stdout from the failing command.
+        stderr: Captured stderr from the failing command.
+        fix_cycle: Which fix cycle this bug is being filed in (1-indexed).
+        milestone_issue_number: GitHub issue number of the milestone tracker issue.
+        depends_on: Node IDs this node depends on.
+
+    Returns:
+        A :class:`GraphNode` with type ``"bug"``.
+    """
+    import hashlib
+
+    # Derive a short stable slug from the assertion text for the node ID
+    digest = hashlib.sha1(assertion.encode()).hexdigest()[:8]
+    context: dict = {
+        "milestone": milestone,
+        "repo": repo,
+        "assertion": assertion,
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "fix_cycle": fix_cycle,
+    }
+    if milestone_issue_number is not None:
+        context["milestone_issue_number"] = milestone_issue_number
+    return make_node(
+        id=f"{milestone}-bug-{digest}",
+        type="bug",
+        depends_on=depends_on or [],
+        context=context,
+        max_retries=1,
+    )
