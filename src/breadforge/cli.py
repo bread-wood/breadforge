@@ -1633,19 +1633,16 @@ def reconcile(
     )
 
 
-def _build_dashboard() -> Group:
-    """Build a cross-repo, cross-milestone summary table from all bead stores."""
+def _collect_dashboard_rows() -> list[tuple[str, str, list]]:
+    """Collect (repo, milestone, nodes) tuples from all bead stores."""
+    import json as _json
     import re as _re
-
-    from rich.text import Text
 
     beads_dir = Path.home() / ".breadforge" / "beads"
     if not beads_dir.exists():
-        return Group(Text("No bead store found.", style="dim"))
+        return []
 
-    # Collect (repo, milestone, nodes) tuples
-    rows: list[tuple[str, str, list, int]] = []  # (repo, milestone, nodes, open_prs)
-
+    rows: list[tuple[str, str, list]] = []
     for owner_dir in sorted(beads_dir.iterdir()):
         if not owner_dir.is_dir():
             continue
@@ -1656,8 +1653,6 @@ def _build_dashboard() -> Group:
             if not graph_dir.exists():
                 continue
 
-            import json as _json
-
             nodes_by_ms: dict[str, list] = {}
             for f in graph_dir.glob("*.json"):
                 try:
@@ -1665,25 +1660,61 @@ def _build_dashboard() -> Group:
                 except Exception:
                     continue
                 nid = node.get("id", "")
-                m = _re.match(r"^(.*?)(?:-build-|-plan$|-readme$|-research(?:-|$)|-merge$)", nid)
+                m = _re.match(
+                    r"^(.*?)(?:-build-|-plan$|-readme$|-research(?:-|$)|-merge$|-validate$|-bug-)",
+                    nid,
+                )
                 prefix = m.group(1) if m else nid
                 nodes_by_ms.setdefault(prefix, []).append(node)
 
             repo = f"{owner_dir.name}/{repo_dir.name}"
-
-            # Count open PRs from merge queue
-            mq_path = repo_dir / "merge-queue.json"
-            open_prs = 0
-            if mq_path.exists():
-                try:
-                    mq = _json.loads(mq_path.read_text())
-                    open_prs = len(mq.get("items", []))
-                except Exception:
-                    pass
-
             for ms, nodes in sorted(nodes_by_ms.items()):
-                rows.append((repo, ms, nodes, open_prs))
+                rows.append((repo, ms, nodes))
 
+    return rows
+
+
+def _milestone_summary(nodes: list) -> tuple[int, int, str, str]:
+    """Return (done, total, bar, status_markup) for a milestone's nodes."""
+    states = [n.get("state", "") for n in nodes]
+    total = len(states)
+    done = states.count("done")
+    pending = states.count("pending") + states.count("running")
+    abandoned = states.count("abandoned")
+    failed = states.count("failed")
+
+    pct = done / total if total else 0.0
+    bar_filled = int(pct * 8)
+    bar = "█" * bar_filled + "░" * (8 - bar_filled)
+
+    if abandoned or failed:
+        parts = []
+        if abandoned:
+            parts.append(f"{abandoned} abandoned")
+        if failed:
+            parts.append(f"{failed} failed")
+        if pending:
+            parts.append(f"{pending} pending")
+        status = "  ".join(parts)
+        bar_color = "red"
+    elif pending:
+        status = f"{pending} pending"
+        bar_color = "yellow"
+    elif done == total:
+        status = "complete"
+        bar_color = "green"
+    else:
+        status = "idle"
+        bar_color = "dim"
+
+    return done, total, f"[{bar_color}]{bar}[/{bar_color}]", status, bar_color
+
+
+def _build_dashboard() -> Group:
+    """Build a static Rich table from bead store (used by --watch)."""
+    from rich.text import Text
+
+    rows = _collect_dashboard_rows()
     if not rows:
         return Group(Text("No graphs found.", style="dim"))
 
@@ -1691,62 +1722,126 @@ def _build_dashboard() -> Group:
     table.add_column("Repo", style="cyan", no_wrap=True)
     table.add_column("Milestone", no_wrap=True)
     table.add_column("Nodes", justify="right", no_wrap=True)
-    table.add_column("", no_wrap=True)  # progress bar
+    table.add_column("", no_wrap=True)
     table.add_column("Status", no_wrap=True)
 
-    for repo, ms, nodes, _open_prs in rows:
-        states = [n.get("state", "") for n in nodes]
-        total = len(states)
-        done = states.count("done")
-        pending = states.count("pending") + states.count("running")
-        abandoned = states.count("abandoned")
-        failed = states.count("failed")
-
-        pct = done / total if total else 0.0
-        bar_filled = int(pct * 8)
-        bar = "█" * bar_filled + "░" * (8 - bar_filled)
-
-        if abandoned or failed:
-            status_parts = []
-            if abandoned:
-                status_parts.append(f"[red]{abandoned} abandoned[/red]")
-            if failed:
-                status_parts.append(f"[red]{failed} failed[/red]")
-            if pending:
-                status_parts.append(f"[yellow]{pending} pending[/yellow]")
-            status_str = "  ".join(status_parts)
-            bar_color = "red"
-        elif pending:
-            status_str = f"[yellow]{pending} pending[/yellow]"
-            bar_color = "yellow"
-        elif done == total:
-            status_str = "[green]complete[/green]"
-            bar_color = "green"
-        else:
-            status_str = "[dim]idle[/dim]"
-            bar_color = "dim"
-
-        table.add_row(
-            repo,
-            ms,
-            f"{done}/{total}",
-            f"[{bar_color}]{bar}[/{bar_color}]",
-            status_str,
-        )
+    for repo, ms, nodes in rows:
+        done, total, bar_markup, status, _color = _milestone_summary(nodes)
+        table.add_row(repo, ms, f"{done}/{total}", bar_markup, status)
 
     return Group(table)
 
 
+def _launch_dashboard_tui() -> None:
+    """Launch the interactive Textual dashboard."""
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.widgets import Footer, Header, Tree
+    from textual.widgets.tree import TreeNode
+
+    _STATE_COLOR = {
+        "done": "green",
+        "running": "cyan",
+        "pending": "yellow",
+        "abandoned": "red",
+        "failed": "red",
+    }
+
+    def _node_label(node: dict) -> str:
+        nid = node.get("id", "?")
+        state = node.get("state", "?")
+        ntype = node.get("type", "")
+        color = _STATE_COLOR.get(state, "white")
+        cost = node.get("output", {}) or {}
+        cost_str = ""
+        if isinstance(cost, dict) and cost.get("cost_usd"):
+            cost_str = f"  [dim]${cost['cost_usd']:.4f}[/dim]"
+        return f"[{color}]{state:10}[/{color}]  [{('bold' if ntype == 'build' else 'dim')}]{nid}[/]  [dim]{ntype}[/dim]{cost_str}"
+
+    class DashboardApp(App):
+        TITLE = "breadforge dashboard"
+        BINDINGS = [
+            Binding("q", "quit", "Quit"),
+            Binding("r", "refresh", "Refresh"),
+            Binding("space", "toggle_node", "Expand/Collapse", show=True),
+            Binding("enter", "toggle_node", "Expand/Collapse", show=False),
+        ]
+        CSS = """
+        Tree {
+            padding: 1 2;
+        }
+        """
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            yield Tree("breadforge — all graphs", id="tree")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self._populate()
+
+        def _populate(self) -> None:
+            tree: Tree = self.query_one("#tree", Tree)
+            tree.clear()
+            tree.root.expand()
+
+            rows = _collect_dashboard_rows()
+            if not rows:
+                tree.root.add_leaf("[dim]No graphs found.[/dim]")
+                return
+
+            last_repo = None
+            repo_node: TreeNode | None = None
+
+            for repo, ms, nodes in rows:
+                if repo != last_repo:
+                    repo_node = tree.root.add(f"[cyan bold]{repo}[/cyan bold]", expand=True)
+                    last_repo = repo
+
+                done, total, bar_markup, status, color = _milestone_summary(nodes)
+                ms_label = (
+                    f"{bar_markup}  [bold]{ms}[/bold]  "
+                    f"[dim]{done}/{total}[/dim]  [{color}]{status}[/{color}]"
+                )
+                ms_node = repo_node.add(ms_label, expand=False)
+
+                # Sort nodes: plan first, then build, merge, readme, validate
+                _ORDER = {
+                    "plan": 0,
+                    "research": 1,
+                    "build": 2,
+                    "merge": 3,
+                    "readme": 4,
+                    "validate": 5,
+                    "bug": 6,
+                }
+                sorted_nodes = sorted(
+                    nodes, key=lambda n: (_ORDER.get(n.get("type", ""), 9), n.get("id", ""))
+                )
+                for n in sorted_nodes:
+                    ms_node.add_leaf(_node_label(n))
+
+        def action_refresh(self) -> None:
+            self._populate()
+            self.notify("Refreshed")
+
+        def action_toggle_node(self) -> None:
+            tree: Tree = self.query_one("#tree", Tree)
+            node = tree.cursor_node
+            if node is not None and not node.is_leaf:
+                node.toggle()
+
+    DashboardApp().run()
+
+
 @app.command()
 def dashboard(
-    watch: Annotated[bool, typer.Option("--watch", "-w", help="Refresh every 5s.")] = False,
-    active: Annotated[bool, typer.Option("--active", help="Show only incomplete graphs.")] = False,
+    watch: Annotated[
+        bool, typer.Option("--watch", "-w", help="Non-interactive live refresh every 5s.")
+    ] = False,
 ) -> None:
-    """Show all graphs across all repos. Use --watch for live refresh."""
+    """Interactive dashboard — arrow keys to navigate, space/enter to expand nodes."""
     import time as _time
-
-    if active:
-        console.print("[dim]--active not yet implemented; showing all graphs[/dim]")
 
     if watch:
         from rich.live import Live
@@ -1757,7 +1852,7 @@ def dashboard(
                 _time.sleep(5)
         return
 
-    console.print(_build_dashboard())
+    _launch_dashboard_tui()
 
 
 @app.command()
