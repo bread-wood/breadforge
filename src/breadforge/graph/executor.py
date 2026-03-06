@@ -208,10 +208,12 @@ class GraphExecutor:
                 continue
             handler = self._handlers.get(node.type)
             if handler is None:
+                self._store.write_node(node)  # persist pending state before re-dispatch
                 continue
             recovery = handler.recover(node, self._config)
             if recovery is None:
-                continue  # re-dispatch normally
+                self._store.write_node(node)  # persist pending state before re-dispatch
+                continue
             node.output = recovery.output
             if recovery.success:
                 node.state = "done"  # type: ignore[assignment]
@@ -259,8 +261,11 @@ class GraphExecutor:
                     continue
                 node.state = "running"  # type: ignore[assignment]
                 node.touch_started()
-                if self._store and not self._dry_run:
-                    self._store.write_node(node)
+                if self._store and not self._dry_run and not self._store.claim_node(node):
+                    # Another process already claimed this node — skip it.
+                    self._log_info(f"node {node.id} already claimed by another process — skipping")
+                    node.state = "pending"  # type: ignore[assignment]
+                    continue
                 active[node.id] = asyncio.create_task(self._dispatch(node), name=node.id)
                 active_since[node.id] = asyncio.get_event_loop().time()
 

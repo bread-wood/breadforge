@@ -150,6 +150,34 @@ class BeadStore:
     def write_node(self, node: GraphNode) -> None:
         self._atomic_write(self._node_path(node.id), node.model_dump(mode="json"))
 
+    def claim_node(self, node: GraphNode) -> bool:
+        """Atomically transition a node from pending → running on disk.
+
+        Uses fcntl.flock to serialize concurrent claimants (multiple executor
+        instances or a running executor + manual dispatch).  Returns True if the
+        claim succeeded (node was pending on disk and is now written as running).
+        Returns False if the node was already claimed by another process.
+        """
+        import fcntl
+
+        path = self._node_path(node.id)
+        lock_path = path.with_suffix(".lock")
+        lock_path.touch()
+        with lock_path.open() as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                if not path.exists():
+                    # Node not yet on disk — newly created in-memory; write it directly.
+                    self._atomic_write(path, node.model_dump(mode="json"))
+                    return True
+                on_disk = self._read_json(path)
+                if on_disk.get("state") != "pending":
+                    return False  # already claimed by another process
+                self._atomic_write(path, node.model_dump(mode="json"))
+                return True
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
     def read_node(self, node_id: str) -> GraphNode | None:
         path = self._node_path(node_id)
         if not path.exists():
