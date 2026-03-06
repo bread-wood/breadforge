@@ -470,7 +470,7 @@ def make_handlers(
     from breadforge.graph.handlers.readme import ReadmeHandler
     from breadforge.graph.handlers.research import ResearchHandler
 
-    return {
+    handlers: dict[NodeType, NodeHandler] = {
         "plan": PlanHandler(store=store, logger=logger),
         "research": ResearchHandler(store=store, logger=logger),
         "build": BuildHandler(store=store, logger=logger),
@@ -481,3 +481,23 @@ def make_handlers(
         "consensus": ConsensusHandler(store=store, logger=logger),
         "design_doc": DesignDocHandler(store=store, logger=logger),
     }
+
+    # validate and bug handlers — imported defensively; these handler files may
+    # be built in a parallel milestone PR.  If they exist, register them; if not,
+    # the executor will return a "no handler" error for those node types at
+    # runtime (better than crashing at import time).
+    try:
+        from breadforge.graph.handlers.validate import ValidateHandler
+
+        handlers["validate"] = ValidateHandler(store=store, logger=logger)  # type: ignore[index]
+    except ImportError:
+        pass
+
+    try:
+        from breadforge.graph.handlers.bug import BugHandler
+
+        handlers["bug"] = BugHandler(store=store, logger=logger)  # type: ignore[index]
+    except ImportError:
+        pass
+
+    return handlers
