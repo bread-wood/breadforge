@@ -1,2 +1,1 @@
-src/breadforge/graph/handlers/validate.py
-tests/unit/test_validate_handler.py
+src/breadforge/cli.py
