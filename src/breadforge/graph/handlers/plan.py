@@ -313,8 +313,14 @@ def _emit_build_nodes(
     """
     from breadforge.agents.assessor import assess_from_plan_artifact
 
+    # The executor always emits a dedicated readme node after all merges — skip
+    # any "readme" module the LLM may have included to avoid a duplicate issue.
+    _RESERVED_NODE_TYPES = {"readme", "docs", "documentation"}
+
     nodes = []
     for module in artifact.modules:
+        if module.lower().strip() in _RESERVED_NODE_TYPES:
+            continue
         files = artifact.files_per_module.get(module, [])
         module_slug = _slug(module)
         issue_number = _file_module_issue(repo, module, milestone_slug, artifact)
