@@ -1922,7 +1922,7 @@ def _launch_dashboard_tui() -> None:
         def _cursor_node_data(self) -> dict | None:
             tree: Tree = self.query_one("#tree", Tree)
             cursor = tree.cursor_node
-            if cursor is not None and cursor.is_leaf and isinstance(cursor.data, dict):
+            if cursor is not None and not cursor.allow_expand and isinstance(cursor.data, dict):
                 return cursor.data
             return None
 
