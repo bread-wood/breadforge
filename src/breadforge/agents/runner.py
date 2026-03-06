@@ -24,6 +24,10 @@ class RunResult:
     duration_ms: float
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     events: list[dict] = field(default_factory=list)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    # Valid values: "rate_limit", "billing_error", "auth_failure", "error_max_turns"
+    error_type: str | None = None
 
     @property
     def success(self) -> bool:
@@ -41,7 +45,8 @@ class RunResult:
         result = self.find_event("result")
         if result is None:
             return None
-        cost = result.get("cost_usd")
+        # The stream-json result event uses "total_cost_usd"
+        cost = result.get("total_cost_usd") or result.get("cost_usd")
         if cost is not None:
             return float(cost)
         return None
@@ -105,22 +110,37 @@ def _build_env(
     return env
 
 
-async def run_agent(
+def _classify_error(result_event: dict, stderr_text: str) -> str | None:
+    """Classify the terminal error from a stream-json result event and stderr."""
+    subtype = result_event.get("subtype", "")
+    if subtype == "error_max_turns":
+        return "error_max_turns"
+
+    # Check result text and stderr for known error patterns
+    result_text = str(result_event.get("result", "")).lower()
+    combined = result_text + stderr_text.lower()
+
+    if any(kw in combined for kw in ("rate limit", "rate_limit", "429", "too many requests")):
+        return "rate_limit"
+    if any(kw in combined for kw in ("billing", "payment", "quota exceeded", "402")):
+        return "billing_error"
+    if any(kw in combined for kw in ("invalid api key", "authentication", "401", "auth_failure")):
+        return "auth_failure"
+
+    return None
+
+
+async def _run_agent_once(
     prompt: str,
     *,
-    model: str = "claude-sonnet-4-6",
-    timeout_minutes: int = 60,
-    cwd: Path | None = None,
-    allowed_tools: list[str] | None = None,
-    proxy_url: str | None = None,
-    proxy_token: str | None = None,
+    model: str,
+    timeout_minutes: int,
+    cwd: Path | None,
+    allowed_tools: list[str] | None,
+    proxy_url: str | None,
+    proxy_token: str | None,
 ) -> RunResult:
-    """Spawn a headless Claude Code agent and wait for completion.
-
-    When *proxy_url* and *proxy_token* are provided the subprocess routes its
-    Anthropic API requests through the loopback credential proxy rather than
-    using a raw API key.
-    """
+    """Internal helper: run one Claude Code subprocess and return a RunResult."""
     start = datetime.now(UTC)
 
     # Prompt must come before --allowedTools; otherwise the claude CLI
@@ -190,12 +210,83 @@ async def run_agent(
 
     end = datetime.now(UTC)
     duration_ms = (end - start).total_seconds() * 1000
+    stderr_text = "\n".join(stderr_chunks)
+
+    # Extract token counts and error type from the result event
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    error_type: str | None = None
+
+    result_event: dict | None = None
+    for e in events:
+        if e.get("type") == "result":
+            result_event = e
+            break
+
+    if result_event is not None:
+        usage = result_event.get("usage", {})
+        raw_input = usage.get("input_tokens")
+        raw_output = usage.get("output_tokens")
+        if raw_input is not None:
+            input_tokens = int(raw_input)
+        if raw_output is not None:
+            output_tokens = int(raw_output)
+        if result_event.get("is_error"):
+            error_type = _classify_error(result_event, stderr_text)
 
     return RunResult(
         exit_code=exit_code,
         stdout="\n".join(stdout_chunks),
-        stderr="\n".join(stderr_chunks),
+        stderr=stderr_text,
         duration_ms=duration_ms,
         started_at=start,
         events=events,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        error_type=error_type,
     )
+
+
+async def run_agent(
+    prompt: str,
+    *,
+    model: str = "claude-sonnet-4-6",
+    timeout_minutes: int = 60,
+    cwd: Path | None = None,
+    allowed_tools: list[str] | None = None,
+    proxy_url: str | None = None,
+    proxy_token: str | None = None,
+    fallback_model: str | None = "claude-haiku-4-5-20251001",
+) -> RunResult:
+    """Spawn a headless Claude Code agent and wait for completion.
+
+    When *proxy_url* and *proxy_token* are provided the subprocess routes its
+    Anthropic API requests through the loopback credential proxy rather than
+    using a raw API key.
+
+    When *fallback_model* is set and the primary run hits a rate_limit or
+    overload error, the agent is retried once with the fallback model.
+    """
+    result = await _run_agent_once(
+        prompt,
+        model=model,
+        timeout_minutes=timeout_minutes,
+        cwd=cwd,
+        allowed_tools=allowed_tools,
+        proxy_url=proxy_url,
+        proxy_token=proxy_token,
+    )
+
+    if fallback_model and result.error_type in {"rate_limit", "overload"}:
+        print(f"warning: downgrading to fallback model {fallback_model}")  # noqa: T201
+        result = await _run_agent_once(
+            prompt,
+            model=fallback_model,
+            timeout_minutes=timeout_minutes,
+            cwd=cwd,
+            allowed_tools=allowed_tools,
+            proxy_url=proxy_url,
+            proxy_token=proxy_token,
+        )
+
+    return result
