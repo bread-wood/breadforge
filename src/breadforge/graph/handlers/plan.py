@@ -325,6 +325,16 @@ def _emit_build_nodes(
         module_slug = _slug(module)
         issue_number = _file_module_issue(repo, module, milestone_slug, artifact)
         allocation = assess_from_plan_artifact(artifact, module, override_model=override_model)
+
+        # Wire inter-module dependencies: this build node depends on the *merge*
+        # nodes of any modules listed in artifact.module_dependencies[module].
+        dep_modules = artifact.module_dependencies.get(module, [])
+        depends_on = [
+            f"{milestone_slug}-build-{_slug(dep)}-merge"
+            for dep in dep_modules
+            if dep.lower().strip() not in _RESERVED_NODE_TYPES
+        ]
+
         context: dict = {
             "milestone": milestone_slug,
             "module": module,
@@ -341,6 +351,7 @@ def _emit_build_nodes(
                 id=f"{milestone_slug}-build-{module_slug}",
                 type="build",
                 assigned_model=allocation.model,
+                depends_on=depends_on,
                 context=context,
             )
         )

@@ -145,7 +145,10 @@ Produce a JSON object matching this schema exactly (no markdown fences):
   }},
   "confidence": <0.0-1.0>,
   "unknowns": ["<open question>", ...],
-  "risk_flags": ["novel-domain" | "security" | "multi-module-coordination" | ...]
+  "risk_flags": ["novel-domain" | "security" | "multi-module-coordination" | ...],
+  "module_dependencies": {{
+    "<module-that-must-build-last>": ["<module-it-depends-on>", ...]
+  }}
 }}
 
 Rules:
@@ -159,4 +162,7 @@ Rules:
   "multi-module-coordination" if modules share mutable state
 - module_approaches: every module in "modules" must have an entry; describe only what that
   specific ticket does — not work belonging to other modules
+- module_dependencies: list any modules that must be fully merged before another can build;
+  omit the key entirely for modules with no dependencies (do not emit empty lists);
+  integration-test modules should always depend on all other modules
 """

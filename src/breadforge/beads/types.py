@@ -162,6 +162,8 @@ class PlanArtifact(BaseModel):
     unknowns: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
     """e.g. 'novel-domain', 'security', 'multi-module-coordination'."""
+    module_dependencies: dict[str, list[str]] = Field(default_factory=dict)
+    """module → list of modules that must be merged before it can build."""
 
 
 class GraphNode(BaseModel):
