@@ -72,7 +72,11 @@ Steps:
    - If pre-existing: note it in the PR description and file a follow-up issue, but do NOT leave your own
      changes in a state that makes it worse
    - If your changes caused the regression: fix it before pushing
-7. Run lint — must be clean: `uv run ruff check`
+7. Run lint on the FULL source tree — not just your new files:
+   ```
+   uv run ruff check
+   uv run ruff format --check
+   ```
 8. Commit referencing the issue: `git commit -m "feat: <description> (closes #{issue_number})"`
 9. `git push`
 10. Create PR: `gh pr create --repo {repo} --title "<title>" --body "Closes #{issue_number}"`
