@@ -2,16 +2,16 @@ name: CI
 
 on:
   push:
-    branches: ["mainline"]
+    branches: ["main"]
   pull_request:
-    branches: ["mainline"]
+    branches: ["main"]
 
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
