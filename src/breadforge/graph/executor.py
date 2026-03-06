@@ -347,9 +347,9 @@ class GraphExecutor:
                             n.output = existing.output
                             n.retry_count = existing.retry_count
                             if n.state == "done":
-                                result.done.append(n.id)
+                                exec_result.done.append(n.id)
                             else:
-                                result.abandoned.append(n.id)
+                                exec_result.abandoned.append(n.id)
                 graph.add_nodes(new)
                 if self._store:
                     for n in new:
