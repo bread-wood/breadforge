@@ -107,18 +107,60 @@ def _setup_workspace(
     if r.returncode != 0:
         return f"clone failed: {r.stderr[:200]}"
 
-    # Create + push branch (ignore error if branch already exists)
+    # Prevent junk files from being committed: write local exclude rules that
+    # apply only to this worktree and are never committed to the repo.
+    exclude_path = workspace / ".git" / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    exclude_path.write_text(
+        "# breadforge: local excludes — not committed\n"
+        "__pycache__/\n"
+        "*.pyc\n"
+        "*.pyo\n"
+        ".coverage\n"
+        "coverage.json\n"
+        "coverage.xml\n"
+        ".DS_Store\n"
+        "*.egg-info/\n"
+        ".pytest_cache/\n"
+    )
+
+    # Create branch from the clean clone HEAD, force-push to override any stale
+    # remote state from previous failed attempts.  The workspace is always a fresh
+    # depth-1 clone of the default branch so this is intentionally destructive.
     subprocess.run(["git", "checkout", "-b", branch], capture_output=True, cwd=workspace)
-    subprocess.run(["git", "push", "-u", "origin", branch], capture_output=True, cwd=workspace)
 
     if allowed_files:
-        # Write allowed-files manifest
+        # Write allowed-files manifest before the first push so the scope file is
+        # present on the remote branch from the start — agents never need to add it.
         (workspace / ".breadforge-scope").write_text("\n".join(allowed_files) + "\n")
 
         # Install pre-commit hook
         hook_path = workspace / ".git" / "hooks" / "pre-commit"
         hook_path.write_text(_PRE_COMMIT_HOOK)
         hook_path.chmod(0o755)
+
+        # Commit the scope file so it travels with the branch
+        subprocess.run(
+            ["git", "add", ".breadforge-scope"],
+            capture_output=True,
+            cwd=workspace,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", f"chore: set breadforge scope for {branch}",
+             "--no-verify"],
+            capture_output=True,
+            cwd=workspace,
+        )
+
+    # Force-push: override any stale remote branch from a previous failed attempt
+    r = subprocess.run(
+        ["git", "push", "-u", "--force", "origin", branch],
+        capture_output=True,
+        text=True,
+        cwd=workspace,
+    )
+    if r.returncode != 0:
+        return f"branch push failed: {r.stderr[:200]}"
 
     return None
 
