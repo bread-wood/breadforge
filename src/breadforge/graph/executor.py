@@ -139,6 +139,7 @@ class GraphExecutor:
         logger: Logger | None = None,
         concurrency: int = 3,
         watchdog_interval: float = 60.0,
+        max_node_runtime: float | None = 7200.0,
         dry_run: bool = False,
         backend_router: BackendRouter | None = None,
     ) -> None:
@@ -148,15 +149,17 @@ class GraphExecutor:
         self._logger = logger
         self._concurrency = concurrency
         self._watchdog_interval = watchdog_interval
+        self._max_node_runtime = max_node_runtime
         self._dry_run = dry_run
         self._backend_router = backend_router
 
     def _restore_from_store(self, graph: ExecutionGraph, result: ExecutionResult) -> None:
-        """Restore terminal node states and replay plan node expansions.
+        """Restore done node states and replay plan node expansions.
 
-        Walks the initial graph nodes, restoring done/abandoned states from the store.
-        For done plan nodes, also replays their stored new_nodes output so the graph
-        is fully populated without re-running the plan LLM.
+        Only restores nodes recorded as 'done' — abandoned nodes are left as
+        pending so they are re-dispatched on the next run. This lets a re-run
+        act as a repair: done plan/research nodes skip their LLM calls, while
+        previously failed build/merge nodes get a fresh attempt.
         """
         if not self._store:
             return
@@ -169,15 +172,21 @@ class GraphExecutor:
                 continue
             seen.add(node.id)
             existing = self._store.read_node(node.id)
-            if not existing or existing.state not in ("done", "abandoned"):
+            if not existing or existing.state not in ("done", "abandoned", "wont-do"):
                 continue
             node.state = existing.state  # type: ignore[assignment]
-            node.output = existing.output
-            node.retry_count = existing.retry_count
-            if existing.state == "done":
-                result.done.append(node.id)
-            else:
+            if existing.state == "wont-do":
+                # Intentionally skipped — never re-dispatch, even on re-run
                 result.abandoned.append(node.id)
+                continue
+            if existing.state == "abandoned":
+                # Failed — reset to pending so re-run gets a fresh attempt
+                node.state = "pending"  # type: ignore[assignment]
+                self._store.write_node(node)
+                continue
+            # state == "done"
+            node.output = existing.output
+            result.done.append(node.id)
             # Replay plan node expansion so dependents are in the graph
             if node.type == "plan" and existing.output and existing.output.get("new_nodes"):
                 new = [GraphNode(**n) for n in existing.output["new_nodes"]]
@@ -218,18 +227,42 @@ class GraphExecutor:
         self._restore_from_store(graph, result)
         self._recover_running_nodes(graph, result)
         active: dict[str, asyncio.Task[NodeResult]] = {}
+        active_since: dict[str, float] = {}  # node_id → asyncio.get_event_loop().time()
 
         while graph.has_pending() or active:
-            # Fill concurrency slots
+            # Propagate abandonment until stable: a newly abandoned node may unblock
+            # further downstream nodes that also need auto-abandoning.
+            while True:
+                ready = graph.get_ready()
+                newly_abandoned = False
+                for node in ready:
+                    if node.id in active or not node.depends_on:
+                        continue
+                    if all(
+                        (dep_node := graph.get_node(dep)) is not None
+                        and dep_node.state == "abandoned"
+                        for dep in node.depends_on
+                    ):
+                        node.state = "abandoned"  # type: ignore[assignment]
+                        result.abandoned.append(node.id)
+                        if self._store and not self._dry_run:
+                            self._store.write_node(node)
+                        self._log_info(f"node {node.id} auto-abandoned: all dependencies failed")
+                        newly_abandoned = True
+                if not newly_abandoned:
+                    break
+
+            # Fill concurrency slots with remaining pending nodes
             ready = graph.get_ready()
             for node in ready[: self._concurrency - len(active)]:
                 if node.id in active:
                     continue
                 node.state = "running"  # type: ignore[assignment]
                 node.touch_started()
-                if self._store:
+                if self._store and not self._dry_run:
                     self._store.write_node(node)
                 active[node.id] = asyncio.create_task(self._dispatch(node), name=node.id)
+                active_since[node.id] = asyncio.get_event_loop().time()
 
             if not active:
                 # No active tasks and nothing became ready — check for deadlock
@@ -243,9 +276,22 @@ class GraphExecutor:
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
+            # Watchdog: cancel tasks that have exceeded max_node_runtime
+            if self._max_node_runtime is not None:
+                now = asyncio.get_event_loop().time()
+                for node_id, task in list(active.items()):
+                    elapsed = now - active_since.get(node_id, now)
+                    if elapsed > self._max_node_runtime and not task.done():
+                        task.cancel()
+                        self._log_error(
+                            f"node {node_id} killed by watchdog after {elapsed:.0f}s "
+                            f"(max {self._max_node_runtime:.0f}s)"
+                        )
+
             for task in done_tasks:
                 node_id = task.get_name()
                 active.pop(node_id, None)
+                active_since.pop(node_id, None)
                 node = graph.get_node(node_id)
                 if node is None:
                     continue
@@ -324,13 +370,19 @@ class GraphExecutor:
     ) -> None:
         node.touch_completed()
         node.output = result.output
+        if not result.success and result.error:
+            node.output = {**node.output, "_error": result.error}
 
         if result.success:
             node.state = "done"  # type: ignore[assignment]
             exec_result.done.append(node.id)
-            # Dry-run skipped nodes must not be persisted as done — a real run
-            # would then skip them via _restore_from_store and never execute them.
-            if result.output.get("skipped") and self._dry_run:
+            # In dry-run mode nothing is persisted — a real run must start fresh.
+            if self._dry_run:
+                if node.type == "plan" and result.output.get("new_nodes"):
+                    new = [GraphNode(**n) for n in result.output["new_nodes"]]
+                    new = _add_overlap_edges(new)
+                    graph.add_nodes(new)
+                    self._log_info(f"plan {node.id} expanded graph: +{len(new)} nodes")
                 return
             self._log_info(f"node {node.id} done")
 
@@ -375,7 +427,7 @@ class GraphExecutor:
                             node.state = "done"  # type: ignore[assignment]
                             exec_result.done.append(node.id)
                             self._log_info(f"node {node.id} recovered on retry (PR already exists)")
-                            if self._store:
+                            if self._store and not self._dry_run:
                                 self._store.write_node(node)
                             return
                     node.state = "pending"  # type: ignore[assignment]
@@ -389,7 +441,7 @@ class GraphExecutor:
                         f"node {node.id} abandoned after {node.retry_count} attempts: {result.error}"
                     )
 
-        if self._store:
+        if self._store and not self._dry_run:
             self._store.write_node(node)
 
     def _log_info(self, message: str, **kwargs: Any) -> None:

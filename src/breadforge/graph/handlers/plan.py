@@ -148,7 +148,7 @@ async def _call_plan_llm(
         from breadforge.backends import get_backend
 
         backend = get_backend(plan_backend, model=plan_model_override)
-        response = await backend.complete(prompt, max_tokens=1500)
+        response = await backend.complete(prompt, max_tokens=4096)
         text = response.content
     else:
         try:
@@ -159,7 +159,7 @@ async def _call_plan_llm(
             call = LLMCall(
                 model=effective_model,
                 messages=[LLMMessage(role=MessageRole.USER, content=prompt)],
-                max_tokens=1500,
+                max_tokens=4096,
                 caller="breadforge.plan",
             )
             llm_response = await registry.complete(call)
@@ -170,7 +170,7 @@ async def _call_plan_llm(
             client = anthropic.AsyncAnthropic()
             sdk_response = await client.messages.create(
                 model=effective_model,
-                max_tokens=1500,
+                max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = sdk_response.content[0].text  # type: ignore[union-attr]
@@ -285,6 +285,8 @@ def _file_module_issue(
             body,
             "--label",
             "stage/impl",
+            "--milestone",
+            milestone_slug,
         ],
         capture_output=True,
         text=True,
@@ -313,12 +315,28 @@ def _emit_build_nodes(
     """
     from breadforge.agents.assessor import assess_from_plan_artifact
 
+    # The executor always emits a dedicated readme node after all merges — skip
+    # any "readme" module the LLM may have included to avoid a duplicate issue.
+    _RESERVED_NODE_TYPES = {"readme", "docs", "documentation"}
+
     nodes = []
     for module in artifact.modules:
+        if module.lower().strip() in _RESERVED_NODE_TYPES:
+            continue
         files = artifact.files_per_module.get(module, [])
         module_slug = _slug(module)
         issue_number = _file_module_issue(repo, module, milestone_slug, artifact)
         allocation = assess_from_plan_artifact(artifact, module, override_model=override_model)
+
+        # Wire inter-module dependencies: this build node depends on the *merge*
+        # nodes of any modules listed in artifact.module_dependencies[module].
+        dep_modules = artifact.module_dependencies.get(module, [])
+        depends_on = [
+            f"{milestone_slug}-build-{_slug(dep)}-merge"
+            for dep in dep_modules
+            if dep.lower().strip() not in _RESERVED_NODE_TYPES
+        ]
+
         context: dict = {
             "milestone": milestone_slug,
             "module": module,
@@ -335,6 +353,7 @@ def _emit_build_nodes(
                 id=f"{milestone_slug}-build-{module_slug}",
                 type="build",
                 assigned_model=allocation.model,
+                depends_on=depends_on,
                 context=context,
             )
         )
@@ -457,3 +476,7 @@ class PlanHandler:
                 "new_nodes": [n.model_dump(mode="json") for n in new_nodes],
             },
         )
+
+    def recover(self, node: GraphNode, config: Config) -> NodeResult | None:
+        """Plan nodes have no recoverable state — always re-dispatch."""
+        return None

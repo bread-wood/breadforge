@@ -116,3 +116,7 @@ class ReadmeHandler:
                     self._store.write_work_bead(bead)
 
         return NodeResult(success=True, output={"readme": True, "repo": repo})
+
+    def recover(self, node: GraphNode, config: Config) -> NodeResult | None:
+        """Readme nodes have no recoverable state — always re-dispatch."""
+        return None

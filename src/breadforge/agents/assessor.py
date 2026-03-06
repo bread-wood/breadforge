@@ -190,7 +190,7 @@ def assess_from_plan_artifact(
     # Low-risk module heuristic: infra/scaffold/docs modules don't need opus
     # even when the artifact has global risk flags.
     _LOW_RISK_KEYWORDS = {"infra", "scaffold", "docs", "readme", "ci", "config"}
-    module_lower = module.lower().lstrip("mod:").strip()
+    module_lower = module.lower().removeprefix("mod:").strip()
     is_low_risk_module = any(k in module_lower for k in _LOW_RISK_KEYWORDS)
 
     if not is_low_risk_module:

@@ -144,7 +144,7 @@ class CampaignBead(BaseModel):
 NodeType = Literal[
     "research", "plan", "build", "merge", "readme", "wait", "consensus", "design_doc"
 ]
-NodeState = Literal["pending", "running", "done", "failed", "abandoned"]
+NodeState = Literal["pending", "running", "done", "failed", "abandoned", "wont-do"]
 
 
 class PlanArtifact(BaseModel):
@@ -162,6 +162,8 @@ class PlanArtifact(BaseModel):
     unknowns: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
     """e.g. 'novel-domain', 'security', 'multi-module-coordination'."""
+    module_dependencies: dict[str, list[str]] = Field(default_factory=dict)
+    """module → list of modules that must be merged before it can build."""
 
 
 class GraphNode(BaseModel):

@@ -101,6 +101,10 @@ class ResearchHandler:
             out["cost_usd"] = agent_cost
         return NodeResult(success=True, output=out)
 
+    def recover(self, node: GraphNode, config: Config) -> NodeResult | None:
+        """Research nodes have no recoverable state — always re-dispatch."""
+        return None
+
     async def _execute_via_backend(self, prompt: str, config: Config) -> str | None:
         """Call a non-anthropic backend directly and return the text content."""
         from breadforge.backends import get_backend
