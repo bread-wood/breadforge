@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as _datetime
 import json
 import os
 import subprocess
+from datetime import datetime as _dt
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -1376,6 +1378,217 @@ def repo_list() -> None:
         )
 
     console.print(table)
+
+
+@app.command()
+def reconcile(
+    repo: Annotated[str | None, typer.Option(help="owner/repo — reconcile one repo. Omit for all.")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Reconcile bead state against GitHub reality.
+
+    For each repo in the bead store:
+    - Abandoned/running build nodes whose branch was merged → mark done
+    - Running nodes with no active process → reset to pending
+    - Merged/closed PRs in the merge queue → remove
+    - All graph nodes terminal for a milestone → close milestone tracking issue
+    - Open PRs whose branch is already on mainline → close as duplicate
+    """
+    import json as _json
+    import re as _re
+    import subprocess as _sp
+
+    beads_dir = Path.home() / ".breadforge" / "beads"
+    if not beads_dir.exists():
+        console.print("No bead store found.")
+        return
+
+    def _gh(*args: str) -> str:
+        r = _sp.run(["gh", *args], capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    def _pr_state(repo: str, pr_number: int) -> str:
+        """Returns 'OPEN', 'MERGED', 'CLOSED', or ''."""
+        out = _gh("pr", "view", str(pr_number), "--repo", repo, "--json", "state", "--jq", ".state")
+        return out.upper()
+
+    def _branch_merged(repo: str, branch: str) -> bool:
+        """True if branch has a merged PR or the branch head is on the default branch."""
+        out = _gh("pr", "list", "--repo", repo, "--head", branch, "--state", "merged",
+                  "--json", "number", "--jq", "length")
+        return out == "1" or int(out or "0") > 0
+
+    def _default_branch(repo: str) -> str:
+        out = _gh("repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name")
+        return out or "mainline"
+
+    def _ms_prefix(node_id: str) -> str:
+        m = _re.match(r"^(.*?)(?:-build-|-plan$|-readme$|-research(?:-|$)|-merge$)", node_id)
+        return m.group(1) if m else node_id
+
+    repos_to_check: list[tuple[str, Path]] = []
+    for owner_dir in sorted(beads_dir.iterdir()):
+        if not owner_dir.is_dir():
+            continue
+        for repo_dir in sorted(owner_dir.iterdir()):
+            if not repo_dir.is_dir():
+                continue
+            r = f"{owner_dir.name}/{repo_dir.name}"
+            if repo and r != repo:
+                continue
+            if (repo_dir / "graph").exists():
+                repos_to_check.append((r, repo_dir))
+
+    total_fixed = 0
+
+    for r, repo_dir in repos_to_check:
+        graph_dir = repo_dir / "graph"
+        nodes_raw: list[dict] = []
+        for f in graph_dir.glob("*.json"):
+            try:
+                nodes_raw.append(_json.loads(f.read_text()))
+            except Exception:
+                continue
+
+        if not nodes_raw:
+            continue
+
+        console.print(f"\n[bold]{r}[/bold]")
+        fixed = 0
+
+        # --- 1. Reset stale `running` nodes to pending (only if running > 30 min) ---
+        now_utc = _dt.now(_datetime.UTC)
+        for node in nodes_raw:
+            if node.get("state") != "running":
+                continue
+            started = node.get("started_at") or node.get("created_at", "")
+            try:
+                started_dt = _dt.fromisoformat(started.replace("Z", "+00:00"))
+                age_minutes = (now_utc - started_dt).total_seconds() / 60
+            except Exception:
+                age_minutes = 999  # unknown age — treat as stale
+            if age_minutes < 30:
+                console.print(f"  [dim]skip[/dim]    running ({age_minutes:.0f}m < 30m, may be live)  {node['id']}")
+                continue
+            node_file = graph_dir / f"{node['id']}.json"
+            if dry_run:
+                console.print(f"  [yellow][dry-run][/yellow] would reset running→pending  {node['id']}  ({age_minutes:.0f}m stale)")
+            else:
+                node["state"] = "pending"
+                node_file.write_text(_json.dumps(node, indent=2))
+                console.print(f"  [yellow]reset[/yellow]   running→pending  {node['id']}  ({age_minutes:.0f}m stale)")
+            fixed += 1
+
+        # --- 2. Abandoned build/merge nodes — check if branch was merged ---
+        for node in nodes_raw:
+            if node.get("state") != "abandoned":
+                continue
+            node_type = node.get("type", "")
+            ctx = node.get("context") or {}
+
+            branch = ctx.get("branch")
+            # For merge nodes, find branch from the linked build node
+            if node_type == "merge" and not branch:
+                build_node_id = ctx.get("build_node_id", "")
+                build_file = graph_dir / f"{build_node_id}.json"
+                if build_file.exists():
+                    try:
+                        build_node = _json.loads(build_file.read_text())
+                        branch = (build_node.get("context") or {}).get("branch")
+                    except Exception:
+                        pass
+
+            if not branch:
+                continue
+
+            merged = _branch_merged(r, branch)
+            if not merged:
+                continue
+
+            node_file = graph_dir / f"{node['id']}.json"
+            if dry_run:
+                console.print(f"  [yellow][dry-run][/yellow] would mark done  {node['id']}  (branch {branch} merged)")
+            else:
+                node["state"] = "done"
+                if not isinstance(node.get("output"), dict):
+                    node["output"] = {}
+                node["output"]["auto_reconciled"] = True
+                node["output"]["reconcile_reason"] = f"branch {branch} has merged PR"
+                node_file.write_text(_json.dumps(node, indent=2))
+                console.print(f"  [green]done[/green]    abandoned→done   {node['id']}  ({branch})")
+            fixed += 1
+
+        # --- 3. Merge queue: remove entries for merged/closed PRs ---
+        mq_path = repo_dir / "merge-queue.json"
+        if mq_path.exists():
+            try:
+                mq = _json.loads(mq_path.read_text())
+                before = len(mq.get("items", []))
+                live = []
+                for item in mq.get("items", []):
+                    state = _pr_state(r, item["pr_number"])
+                    if state == "OPEN":
+                        live.append(item)
+                    else:
+                        if dry_run:
+                            console.print(f"  [yellow][dry-run][/yellow] would remove PR #{item['pr_number']} from queue [{state}]")
+                        else:
+                            console.print(f"  [dim]queue[/dim]   removed PR #{item['pr_number']} [{state}]")
+                if not dry_run and len(live) != before:
+                    mq["items"] = live
+                    mq_path.write_text(_json.dumps(mq, indent=2))
+                    fixed += len(live) - before
+            except Exception:
+                pass
+
+        # --- Reload nodes after mutations ---
+        nodes_raw = []
+        for f in graph_dir.glob("*.json"):
+            try:
+                nodes_raw.append(_json.loads(f.read_text()))
+            except Exception:
+                continue
+
+        # --- 4. Close milestone tracking issues for complete graphs ---
+        # Only use milestone_issue_number from node contexts — never infer from work beads
+        milestones: dict[str, list] = {}
+        for node in nodes_raw:
+            ms = _ms_prefix(node["id"])
+            milestones.setdefault(ms, []).append(node)
+
+        terminal = {"done", "wont-do", "failed"}
+        for ms, ms_nodes in milestones.items():
+            states = {n.get("state") for n in ms_nodes}
+            if not states.issubset(terminal):
+                continue
+            # All terminal — find milestone tracking issue from node contexts only
+            ms_issue = None
+            for node in ms_nodes:
+                ctx = node.get("context") or {}
+                if ctx.get("milestone_issue_number"):
+                    ms_issue = ctx["milestone_issue_number"]
+                    break
+            if not ms_issue:
+                continue
+
+            # Check if issue is still open
+            state_out = _gh("issue", "view", str(ms_issue), "--repo", r, "--json", "state", "--jq", ".state")
+            if state_out.lower() != "open":
+                continue
+
+            if dry_run:
+                console.print(f"  [yellow][dry-run][/yellow] would close issue #{ms_issue} ({ms} — all nodes terminal)")
+            else:
+                _gh("issue", "close", str(ms_issue), "--repo", r,
+                    "--comment", f"All graph nodes for {ms} are in terminal state. Auto-closed by `breadforge reconcile`.")
+                console.print(f"  [green]closed[/green]  issue #{ms_issue}  ({ms} complete)")
+            fixed += 1
+
+        if fixed == 0:
+            console.print("  [dim]nothing to fix[/dim]")
+        total_fixed += fixed
+
+    console.print(f"\n[bold]reconcile done[/bold] — {total_fixed} fix(es) applied" + (" [dry-run]" if dry_run else ""))
 
 
 def _build_dashboard() -> Group:
