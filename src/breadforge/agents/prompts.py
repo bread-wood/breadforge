@@ -64,7 +64,9 @@ Do not modify pyproject.toml, CLAUDE.md, or README.md unless they are on the lis
    ```"""
 
     standards = _load_standards("issues", "code", "tests", "commits", "prs")
-    standards_block = f"\n\n---\n\n## breadforge Agent Standards\n\n{standards}\n\n---\n" if standards else ""
+    standards_block = (
+        f"\n\n---\n\n## breadforge Agent Standards\n\n{standards}\n\n---\n" if standards else ""
+    )
 
     return f"""You are implementing GitHub issue #{issue_number} in repo `{repo}` on branch `{branch}`.
 {standards_block}
