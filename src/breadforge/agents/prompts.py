@@ -2,6 +2,22 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+
+def _load_standards(*names: str) -> str:
+    """Load named standards files from the standards/ directory next to this package."""
+    standards_dir = Path(__file__).parent.parent.parent.parent / "standards"
+    if not standards_dir.exists():
+        return ""
+    parts = []
+    for name in names:
+        path = standards_dir / f"{name}.md"
+        if path.exists():
+            parts.append(path.read_text())
+    return "\n\n---\n\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Build agent prompt (ported from runner.py)
 # ---------------------------------------------------------------------------
@@ -47,8 +63,11 @@ Do not modify pyproject.toml, CLAUDE.md, or README.md unless they are on the lis
    git push -u origin {branch}
    ```"""
 
-    return f"""You are implementing GitHub issue #{issue_number} in repo `{repo}` on branch `{branch}`.
+    standards = _load_standards("issues", "code", "tests", "commits", "prs")
+    standards_block = f"\n\n---\n\n## breadforge Agent Standards\n\n{standards}\n\n---\n" if standards else ""
 
+    return f"""You are implementing GitHub issue #{issue_number} in repo `{repo}` on branch `{branch}`.
+{standards_block}
 Issue: {issue_title}
 
 {issue_body}

@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
+
 # Load .env from the current working directory (or parents) at startup,
 # before any config or health checks read os.environ.
 def _load_dotenv() -> None:
@@ -1374,6 +1375,306 @@ def repo_list() -> None:
         )
 
     console.print(table)
+
+
+def _build_dashboard() -> Group:
+    """Build a cross-repo, cross-milestone summary table from all bead stores."""
+    import re as _re
+
+    from rich.text import Text
+
+    beads_dir = Path.home() / ".breadforge" / "beads"
+    if not beads_dir.exists():
+        return Group(Text("No bead store found.", style="dim"))
+
+    # Collect (repo, milestone, nodes) tuples
+    rows: list[tuple[str, str, list, int]] = []  # (repo, milestone, nodes, open_prs)
+
+    for owner_dir in sorted(beads_dir.iterdir()):
+        if not owner_dir.is_dir():
+            continue
+        for repo_dir in sorted(owner_dir.iterdir()):
+            if not repo_dir.is_dir():
+                continue
+            graph_dir = repo_dir / "graph"
+            if not graph_dir.exists():
+                continue
+
+            import json as _json
+
+            nodes_by_ms: dict[str, list] = {}
+            for f in graph_dir.glob("*.json"):
+                try:
+                    node = _json.loads(f.read_text())
+                except Exception:
+                    continue
+                nid = node.get("id", "")
+                m = _re.match(r"^(.*?)(?:-build-|-plan$|-readme$|-research(?:-|$)|-merge$)", nid)
+                prefix = m.group(1) if m else nid
+                nodes_by_ms.setdefault(prefix, []).append(node)
+
+            repo = f"{owner_dir.name}/{repo_dir.name}"
+
+            # Count open PRs from merge queue
+            mq_path = repo_dir / "merge-queue.json"
+            open_prs = 0
+            if mq_path.exists():
+                try:
+                    mq = _json.loads(mq_path.read_text())
+                    open_prs = len(mq.get("items", []))
+                except Exception:
+                    pass
+
+            for ms, nodes in sorted(nodes_by_ms.items()):
+                rows.append((repo, ms, nodes, open_prs))
+
+    if not rows:
+        return Group(Text("No graphs found.", style="dim"))
+
+    table = Table(title="breadforge — all graphs", show_header=True)
+    table.add_column("Repo", style="cyan", no_wrap=True)
+    table.add_column("Milestone", no_wrap=True)
+    table.add_column("Nodes", justify="right", no_wrap=True)
+    table.add_column("", no_wrap=True)  # progress bar
+    table.add_column("Status", no_wrap=True)
+
+    for repo, ms, nodes, _open_prs in rows:
+        states = [n.get("state", "") for n in nodes]
+        total = len(states)
+        done = states.count("done")
+        pending = states.count("pending") + states.count("running")
+        abandoned = states.count("abandoned")
+        failed = states.count("failed")
+
+        pct = done / total if total else 0.0
+        bar_filled = int(pct * 8)
+        bar = "█" * bar_filled + "░" * (8 - bar_filled)
+
+        if abandoned or failed:
+            status_parts = []
+            if abandoned:
+                status_parts.append(f"[red]{abandoned} abandoned[/red]")
+            if failed:
+                status_parts.append(f"[red]{failed} failed[/red]")
+            if pending:
+                status_parts.append(f"[yellow]{pending} pending[/yellow]")
+            status_str = "  ".join(status_parts)
+            bar_color = "red"
+        elif pending:
+            status_str = f"[yellow]{pending} pending[/yellow]"
+            bar_color = "yellow"
+        elif done == total:
+            status_str = "[green]complete[/green]"
+            bar_color = "green"
+        else:
+            status_str = "[dim]idle[/dim]"
+            bar_color = "dim"
+
+        table.add_row(
+            repo,
+            ms,
+            f"{done}/{total}",
+            f"[{bar_color}]{bar}[/{bar_color}]",
+            status_str,
+        )
+
+    return Group(table)
+
+
+@app.command()
+def dashboard(
+    watch: Annotated[bool, typer.Option("--watch", "-w", help="Refresh every 5s.")] = False,
+    active: Annotated[bool, typer.Option("--active", help="Show only incomplete graphs.")] = False,
+) -> None:
+    """Show all graphs across all repos. Use --watch for live refresh."""
+    import time as _time
+
+    if active:
+        console.print("[dim]--active not yet implemented; showing all graphs[/dim]")
+
+    if watch:
+        from rich.live import Live
+
+        with Live(console=console, refresh_per_second=1) as live:
+            while True:
+                live.update(_build_dashboard())
+                _time.sleep(5)
+        return
+
+    console.print(_build_dashboard())
+
+
+@app.command()
+def drain(
+    repo: Annotated[str | None, typer.Option(help="owner/repo to operate on.")] = None,
+    watch: Annotated[bool, typer.Option("--watch", help="Loop until no PRs remain pending.")] = False,
+    interval: Annotated[int, typer.Option(help="Seconds between watch loops.")] = 60,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Drain the merge queue: sync open PRs, merge what's green, skip pending.
+
+    Cleans stale bead queue entries, syncs any open GitHub PRs not yet in the
+    queue, then merges PRs where CI passes. Use --watch to loop continuously.
+    """
+    import json as _json
+    import re as _re
+    import time as _time
+
+    from breadforge.beads.types import MergeQueueItem, PRBead
+
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    store = _get_store(config)
+    logger = _get_logger(config)
+
+    def _gh_json(*args: str) -> list | dict | None:
+        r = subprocess.run(["gh", *args], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        try:
+            return _json.loads(r.stdout)
+        except _json.JSONDecodeError:
+            return None
+
+    def _pr_ci_status(pr_number: int) -> str:
+        """Returns 'green', 'pending', 'failing', or 'unknown'."""
+        r = subprocess.run(
+            ["gh", "pr", "checks", str(pr_number), "--repo", repo,
+             "--json", "name,state,conclusion"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return "unknown"
+        try:
+            checks = _json.loads(r.stdout)
+        except _json.JSONDecodeError:
+            return "unknown"
+        if not checks:
+            return "green"
+        states = [c.get("state", "") for c in checks]
+        conclusions = [c.get("conclusion", "") for c in checks]
+        if any(s in ("IN_PROGRESS", "QUEUED", "REQUESTED") for s in states):
+            return "pending"
+        if all(c in ("SUCCESS", "SKIPPED", "") for c in conclusions):
+            return "green"
+        return "failing"
+
+    def sync_and_drain() -> tuple[int, int, int]:
+        """Returns (merged, pending, failing)."""
+        # 1. Remove stale entries (PRs that are already merged/closed)
+        queue = store.read_merge_queue()
+        live_items = []
+        removed = 0
+        for item in queue.items:
+            r = subprocess.run(
+                ["gh", "pr", "view", str(item.pr_number), "--repo", repo,
+                 "--json", "state", "--jq", ".state"],
+                capture_output=True, text=True,
+            )
+            state = r.stdout.strip().lower()
+            if state == "open":
+                live_items.append(item)
+            else:
+                removed += 1
+        if removed:
+            queue.items = live_items
+            store.write_merge_queue(queue)
+            console.print(f"  [dim]cleaned {removed} stale queue entries[/dim]")
+
+        # 2. Sync open PRs from GitHub that aren't in the queue
+        open_prs = _gh_json(
+            "pr", "list", "--repo", repo, "--state", "open",
+            "--json", "number,headRefName,title",
+        ) or []
+        queued_prs = {item.pr_number for item in queue.items}
+        added = 0
+        for pr in open_prs:
+            pr_num = pr["number"]
+            if pr_num not in queued_prs:
+                pr_body = _gh_json("pr", "view", str(pr_num), "--repo", repo, "--json", "body")
+                issue_number = 0
+                if pr_body:
+                    m = _re.search(r"[Cc]loses\s+#(\d+)", pr_body.get("body", ""))
+                    if m:
+                        issue_number = int(m.group(1))
+
+                queue.items.append(MergeQueueItem(
+                    pr_number=pr_num,
+                    issue_number=issue_number,
+                    branch=pr["headRefName"],
+                ))
+                if not store.read_pr_bead(pr_num):
+                    store.write_pr_bead(PRBead(
+                        pr_number=pr_num,
+                        repo=repo,
+                        issue_number=issue_number,
+                        branch=pr["headRefName"],
+                    ))
+                added += 1
+        if added:
+            store.write_merge_queue(queue)
+            console.print(f"  [dim]synced {added} open PRs into queue[/dim]")
+
+        # 3. Drain
+        merged = pending = failing = 0
+        queue = store.read_merge_queue()
+        for item in list(queue.items):
+            ci = _pr_ci_status(item.pr_number)
+            branch = item.branch
+
+            if ci == "green":
+                if dry_run:
+                    console.print(f"  [yellow][dry-run][/yellow] would merge PR #{item.pr_number} ({branch})")
+                    merged += 1
+                    continue
+                r = subprocess.run(
+                    ["gh", "pr", "merge", str(item.pr_number), "--repo", repo,
+                     "--squash", "--delete-branch"],
+                    capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    console.print(f"  [green]merged[/green] PR #{item.pr_number} ({branch})")
+                    pr_bead = store.read_pr_bead(item.pr_number)
+                    if pr_bead:
+                        pr_bead.state = "merged"  # type: ignore[assignment]
+                        store.write_pr_bead(pr_bead)
+                    if item.issue_number:
+                        wb = store.read_work_bead(item.issue_number)
+                        if wb:
+                            wb.state = "closed"  # type: ignore[assignment]
+                            store.write_work_bead(wb)
+                    queue.items = [i for i in queue.items if i.pr_number != item.pr_number]
+                    store.write_merge_queue(queue)
+                    if logger:
+                        logger.merge(item.pr_number, item.issue_number, branch)
+                    merged += 1
+                else:
+                    console.print(f"  [red]merge failed[/red] PR #{item.pr_number}: {r.stderr[:120]}")
+                    failing += 1
+            elif ci == "pending":
+                console.print(f"  [yellow]pending[/yellow]  PR #{item.pr_number} ({branch}) — CI running")
+                pending += 1
+            elif ci == "failing":
+                console.print(f"  [red]failing[/red]   PR #{item.pr_number} ({branch}) — CI failed")
+                failing += 1
+            else:
+                console.print(f"  [dim]unknown[/dim]   PR #{item.pr_number} ({branch}) — no CI data")
+                pending += 1
+
+        return merged, pending, failing
+
+    loop = 0
+    while True:
+        loop += 1
+        console.print(f"\n[bold]drain loop #{loop}[/bold] — {repo}")
+        merged, pending, failing = sync_and_drain()
+        console.print(f"  [bold]merged {merged}[/bold]  pending {pending}  failing {failing}")
+
+        if not watch or pending == 0:
+            break
+
+        console.print(f"  sleeping {interval}s…")
+        _time.sleep(interval)
 
 
 @app.command("gha-dispatch")
