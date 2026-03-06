@@ -457,3 +457,7 @@ class PlanHandler:
                 "new_nodes": [n.model_dump(mode="json") for n in new_nodes],
             },
         )
+
+    def recover(self, node: GraphNode, config: Config) -> NodeResult | None:
+        """Plan nodes have no recoverable state — always re-dispatch."""
+        return None

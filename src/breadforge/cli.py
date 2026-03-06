@@ -4,9 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
+
+# Load .env from the current working directory (or parents) at startup,
+# before any config or health checks read os.environ.
+def _load_dotenv() -> None:
+    for directory in (Path.cwd(), *Path.cwd().parents):
+        env_file = directory / ".env"
+        if env_file.is_file():
+            with env_file.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    os.environ.setdefault(key, value)
+            break
+
+_load_dotenv()
 
 if TYPE_CHECKING:
     from breadforge.graph.executor import ExecutionGraph
@@ -57,6 +77,8 @@ def _require_repo(repo: str | None) -> str:
 
 
 _BREADFORGE_BOT = "yeast-bot"
+
+
 
 _CI_WORKFLOW_TEMPLATE = """\
 name: CI
@@ -118,13 +140,13 @@ def _accept_bot_invitation(repo: str, token: str) -> None:
         matching = [
             inv["id"]
             for inv in invitations
-            if inv.get("repository", {}).get("full_name", "") == repo
+            if isinstance(inv, dict) and inv.get("repository", {}).get("full_name", "") == repo
         ]
     except (json.JSONDecodeError, KeyError, TypeError):
         return
 
     for inv_id in matching:
-        subprocess.run(
+        accept = subprocess.run(
             [
                 "curl",
                 "-s",
@@ -141,6 +163,11 @@ def _accept_bot_invitation(repo: str, token: str) -> None:
             capture_output=True,
             text=True,
         )
+        http_code = accept.stdout.strip()
+        if http_code not in ("204", ""):
+            console.print(
+                f"  [yellow]warning:[/yellow] invitation {inv_id} accept returned HTTP {http_code}"
+            )
 
 
 def _add_bot_collaborator(repo: str) -> None:
@@ -186,7 +213,6 @@ def _add_bot_collaborator(repo: str) -> None:
 
     _accept_bot_invitation(repo, token)
     console.print(f"  {_BREADFORGE_BOT} accepted invitation to {repo}")
-
 
 def _install_ci_workflow(repo: str, branch: str = "mainline") -> None:
     """Install a basic CI workflow on *repo* if one does not already exist."""
@@ -631,15 +657,19 @@ def run(
                         sub_path, repo, config, store, logger, milestone, dry_run
                     )
                     all_issue_numbers.extend(issue_numbers)
-                    ms = milestone or parse_spec(sub_path).version
-                    _spec_paths.append((sub_path, ms, issue_numbers[0] if issue_numbers else None))
+                    if issue_numbers:
+                        ms = milestone or parse_spec(sub_path).version
+                        milestone_issue = issue_numbers[0] if issue_numbers[0] != -1 else None
+                        _spec_paths.append((sub_path, ms, milestone_issue))
         else:
             issue_numbers = _run_single_spec(
                 spec_path, repo, config, store, logger, milestone, dry_run
             )
             all_issue_numbers.extend(issue_numbers)
-            ms = milestone or parse_spec(spec_path).version
-            _spec_paths.append((spec_path, ms, issue_numbers[0] if issue_numbers else None))
+            if issue_numbers:
+                ms = milestone or parse_spec(spec_path).version
+                milestone_issue = issue_numbers[0] if issue_numbers[0] != -1 else None
+                _spec_paths.append((spec_path, ms, milestone_issue))
 
     if not all_issue_numbers and not _spec_paths:
         console.print("No issues to dispatch.")
@@ -703,6 +733,11 @@ def run(
                         f"  {ms}: done={len(result.done)} failed={len(result.failed)} "
                         f"abandoned={len(result.abandoned)}"
                     )
+                    for nid in result.abandoned:
+                        node = graph.get_node(nid)
+                        err = (node.output or {}).get("_error") if node else None
+                        if err:
+                            console.print(f"  [red]  {nid}:[/red] {err}")
 
         asyncio.run(_run_graph())
     else:
@@ -971,16 +1006,27 @@ def _build_status_table(
     return Group(*tables)
 
 
+def _detect_latest_milestone(store: BeadStore) -> str | None:
+    """Return the latest milestone slug from the campaign bead or work beads."""
+    campaign = store.read_campaign_bead()
+    if campaign and campaign.milestones:
+        return campaign.milestones[-1].milestone
+    milestones = sorted({b.milestone for b in store.list_work_beads() if b.milestone})
+    return milestones[-1] if milestones else None
+
+
 @app.command()
 def status(
     repo: Annotated[str | None, typer.Option()] = None,
     milestone: Annotated[str | None, typer.Option()] = None,
     watch: Annotated[bool, typer.Option("--watch", "-w", help="Refresh every 3s.")] = False,
 ) -> None:
-    """Show bead state table. Use --watch for live refresh."""
+    """Show bead state table for the latest milestone. Use --watch for live refresh."""
     repo = _require_repo(repo)
     config = Config.from_env(repo)
     store = _get_store(config)
+    if milestone is None:
+        milestone = _detect_latest_milestone(store)
 
     if watch:
         import time
@@ -1190,68 +1236,14 @@ def run_issue(
     bead_data = [{"number": issue, "title": issue_title}]
     _seed_work_beads(store, bead_data, milestone_title or "unknown", None, repo)
 
-    # Try to find a spec file matching this milestone
-    spec_path: Path | None = None
-    if milestone_title:
-        for candidate in sorted(Path("specs").glob("*.md")):
-            try:
-                sp = parse_spec(candidate)
-                if sp.version == milestone_title:
-                    spec_path = candidate
-                    break
-            except Exception:
-                continue
+    # Dispatch the single issue via the rolling dispatcher.
+    # run-issue is for single-issue dispatch (e.g. from GHA); it must not attempt
+    # to resume or re-plan the full milestone graph.
+    from breadforge.dispatch import RollingDispatcher
 
-    if spec_path:
-        from breadforge.graph.builder import build_greenfield_graph
-        from breadforge.graph.executor import GraphExecutor, make_handlers
-
-        handlers = make_handlers(store=store, logger=logger)
-        executor = GraphExecutor(
-            config=config,
-            handlers=handlers,
-            store=store,
-            logger=logger,
-            concurrency=config.concurrency,
-            watchdog_interval=float(config.watchdog_interval_seconds),
-        )
-
-        import tempfile
-
-        repo_clone_dir = tempfile.mkdtemp(prefix="breadforge-clone-")
-        clone_result = subprocess.run(
-            ["gh", "repo", "clone", config.repo, repo_clone_dir, "--", "--depth=1"],
-            capture_output=True,
-            text=True,
-        )
-        repo_local_path = repo_clone_dir if clone_result.returncode == 0 else ""
-        if not repo_local_path:
-            console.print(
-                f"[yellow]warning:[/yellow] could not clone {config.repo} for codebase assessment"
-            )
-
-        async def _run_graph() -> None:
-            graph = build_greenfield_graph(
-                milestone=milestone_title,
-                spec_file=spec_path,
-                repo=config.repo,
-                repo_local_path=repo_local_path,
-                milestone_issue_number=issue,
-            )
-            result = await executor.run(graph)
-            console.print(
-                f"done={len(result.done)} failed={len(result.failed)} "
-                f"abandoned={len(result.abandoned)}"
-            )
-
-        asyncio.run(_run_graph())
-    else:
-        # Fallback: rolling dispatcher for issue-number-only dispatch
-        from breadforge.dispatch import RollingDispatcher
-
-        dispatcher = RollingDispatcher(config, store, logger)
-        asyncio.run(dispatcher.run([issue]))
-        console.print(f"[green]Done.[/green] Completed: {dispatcher.completed_count}")
+    dispatcher = RollingDispatcher(config, store, logger)
+    asyncio.run(dispatcher.run([issue]))
+    console.print(f"[green]Done.[/green] Completed: {dispatcher.completed_count}")
 
 
 @app.command()

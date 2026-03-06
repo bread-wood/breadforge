@@ -106,7 +106,7 @@ def _detect_anomalies(
                         repair_tier="auto",
                     )
                 )
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, AttributeError):
             pass
 
     # --- Stale labels ---

@@ -204,7 +204,10 @@ class RollingDispatcher:
                 )
                 return
 
-        branch = f"{issue_number}-{bead.title[:40].lower().replace(' ', '-').replace('/', '-')}"
+        import re
+        slug = re.sub(r"[^a-z0-9-]", "-", bead.title[:40].lower()).strip("-")
+        slug = re.sub(r"-{2,}", "-", slug)
+        branch = f"{issue_number}-{slug}"
         bead.branch = branch
         bead.state = "claimed"  # type: ignore
         self._store.write_work_bead(bead)

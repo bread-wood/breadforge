@@ -324,6 +324,40 @@ class TestGraphExecutor:
         assert not result.success or node.state == "pending"
         assert handler.execute.call_count == 0
 
+    def test_rerun_retries_abandoned_nodes(self, config: Config, store: BeadStore) -> None:
+        """On a second run, previously abandoned build nodes are re-dispatched."""
+        from breadforge.beads import GraphNode as StoredNode
+
+        # Simulate a previous run: plan done, build abandoned
+        plan_node_data = make_node("v1-plan", type="plan")
+        plan_node_data.state = "done"  # type: ignore[assignment]
+        plan_node_data.output = {}
+        store.write_node(plan_node_data)
+
+        build_node_data = make_node("v1-build")
+        build_node_data.state = "abandoned"  # type: ignore[assignment]
+        build_node_data.retry_count = 3
+        store.write_node(build_node_data)
+
+        # New run: build handler now succeeds
+        plan_handler = mock_handler(success=True)
+        build_handler = mock_handler(success=True)
+        executor = GraphExecutor(
+            config=config,
+            handlers={"plan": plan_handler, "build": build_handler},
+            store=store,
+            concurrency=2,
+            watchdog_interval=0.1,
+        )
+        graph = ExecutionGraph([make_node("v1-plan", type="plan"), make_node("v1-build")])
+        result = asyncio.run(executor.run(graph))
+
+        # Plan stays done (not re-run); build is re-dispatched and succeeds
+        assert "v1-plan" in result.done
+        assert "v1-build" in result.done
+        assert plan_handler.execute.call_count == 0  # skipped (was done)
+        assert build_handler.execute.call_count == 1  # retried
+
     def test_store_persists_nodes(self, config: Config, store: BeadStore) -> None:
         handler = mock_handler(success=True)
         executor = GraphExecutor(
@@ -338,3 +372,94 @@ class TestGraphExecutor:
         persisted = store.read_node("build-a")
         assert persisted is not None
         assert persisted.state == "done"
+
+    def test_auto_abandon_when_all_deps_abandoned(self, config: Config) -> None:
+        """A node whose every dependency is abandoned is auto-abandoned without being dispatched."""
+        build_handler = mock_handler(success=False, error="clone failed")
+        downstream_handler = mock_handler(success=True)
+
+        build = make_node("build-a", max_retries=1)
+        downstream = make_node("merge-a", type="merge", depends_on=["build-a"])
+
+        executor = GraphExecutor(
+            config=config,
+            handlers={"build": build_handler, "merge": downstream_handler},
+            concurrency=2,
+            watchdog_interval=0.1,
+        )
+        graph = ExecutionGraph([build, downstream])
+        result = asyncio.run(executor.run(graph))
+
+        assert "build-a" in result.abandoned
+        assert "merge-a" in result.abandoned
+        assert downstream_handler.execute.call_count == 0
+
+    def test_auto_abandon_propagates_through_chain(self, config: Config) -> None:
+        """Auto-abandonment cascades: build→merge→readme all abandoned."""
+        build_handler = mock_handler(success=False, error="failed")
+        merge_handler = mock_handler(success=True)
+        readme_handler = mock_handler(success=True)
+
+        build = make_node("build", max_retries=1)
+        merge = make_node("merge", type="merge", depends_on=["build"])
+        readme = make_node("readme", type="readme", depends_on=["merge"])
+
+        executor = GraphExecutor(
+            config=config,
+            handlers={"build": build_handler, "merge": merge_handler, "readme": readme_handler},
+            concurrency=3,
+            watchdog_interval=0.1,
+        )
+        graph = ExecutionGraph([build, merge, readme])
+        result = asyncio.run(executor.run(graph))
+
+        assert "build" in result.abandoned
+        assert "merge" in result.abandoned
+        assert "readme" in result.abandoned
+        assert merge_handler.execute.call_count == 0
+        assert readme_handler.execute.call_count == 0
+
+    def test_auto_abandon_skipped_when_any_dep_done(self, config: Config) -> None:
+        """Node with mixed deps (some done, some abandoned) still runs."""
+        build_a_done = make_node("build-a")
+        build_b_fail = make_node("build-b", max_retries=1)
+        readme = make_node("readme", type="readme", depends_on=["build-a", "build-b"])
+
+        async def execute_build(node, cfg):
+            if node.id == "build-a":
+                return NodeResult(success=True)
+            return NodeResult(success=False, error="failed")
+
+        from unittest.mock import MagicMock
+        build_handler = MagicMock()
+        build_handler.execute = execute_build
+        build_handler.recover = MagicMock(return_value=None)
+        readme_handler = mock_handler(success=True)
+
+        executor = GraphExecutor(
+            config=config,
+            handlers={"build": build_handler, "readme": readme_handler},
+            concurrency=3,
+            watchdog_interval=0.1,
+        )
+        graph = ExecutionGraph([build_a_done, build_b_fail, readme])
+        result = asyncio.run(executor.run(graph))
+
+        assert "build-a" in result.done
+        assert "build-b" in result.abandoned
+        assert "readme" in result.done  # ran because build-a succeeded
+        assert readme_handler.execute.call_count == 1
+
+    def test_auto_abandon_node_without_deps_not_affected(self, config: Config) -> None:
+        """Nodes with no dependencies are never auto-abandoned."""
+        handler = mock_handler(success=True)
+        graph = ExecutionGraph([make_node("build-a")])
+        executor = GraphExecutor(
+            config=config,
+            handlers={"build": handler},
+            concurrency=1,
+            watchdog_interval=0.1,
+        )
+        result = asyncio.run(executor.run(graph))
+        assert "build-a" in result.done
+        assert handler.execute.call_count == 1

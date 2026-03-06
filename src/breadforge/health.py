@@ -41,12 +41,11 @@ class HealthReport:
 
 
 def _check_bot_collaborator(repo: str, bot_token: str) -> CheckResult:
-    """Check that yeast-bot is an active collaborator; auto-add and accept invitation if not.
+    """Check that yeast-bot is an active collaborator on *repo*.
 
-    Runs the PUT collaborator call as the repo owner (ambient gh credentials),
+    If missing, auto-adds them using the owner's ambient gh credentials,
     then accepts the invitation as yeast-bot using *bot_token*.
     """
-    # Check current status
     check = subprocess.run(
         ["gh", "api", f"repos/{repo}/collaborators/yeast-bot", "--silent"],
         capture_output=True,
@@ -57,7 +56,8 @@ def _check_bot_collaborator(repo: str, bot_token: str) -> CheckResult:
             "bot-collaborator", CheckStatus.PASS, f"yeast-bot is a collaborator on {repo}"
         )
 
-    # Not yet a collaborator — add using owner's ambient gh auth (no GH_TOKEN override)
+    # Not a collaborator — auto-add using owner's ambient gh credentials (strip GH_TOKEN
+    # so we don't accidentally auth as the bot)
     env = {k: v for k, v in os.environ.items() if k != "GH_TOKEN"}
     add = subprocess.run(
         ["gh", "api", f"repos/{repo}/collaborators/yeast-bot", "-X", "PUT", "-f", "permission=push"],
@@ -69,39 +69,53 @@ def _check_bot_collaborator(repo: str, bot_token: str) -> CheckResult:
         return CheckResult(
             "bot-collaborator",
             CheckStatus.FAIL,
-            f"could not add yeast-bot to {repo}: {add.stderr.strip()} — "
-            f"run: gh api repos/{repo}/collaborators/yeast-bot -X PUT -f permission=push",
+            f"yeast-bot is not a collaborator on {repo} and auto-add failed: {add.stderr.strip()}",
         )
 
-    # Accept the pending invitation as yeast-bot
-    list_r = subprocess.run(
+    if not bot_token:
+        return CheckResult(
+            "bot-collaborator",
+            CheckStatus.FAIL,
+            f"added yeast-bot to {repo} but BREADFORGE_GH_TOKEN is not set; cannot accept the invitation",
+        )
+
+    # Accept the invitation as yeast-bot
+    list_result = subprocess.run(
         ["curl", "-s", "-H", f"Authorization: token {bot_token}",
          "https://api.github.com/user/repository_invitations"],
         capture_output=True,
         text=True,
     )
     try:
-        invitations = json.loads(list_r.stdout)
-        matching = [
-            inv["id"] for inv in invitations
+        invitations = json.loads(list_result.stdout)
+        matching_ids = [
+            inv["id"]
+            for inv in invitations
             if isinstance(inv, dict) and inv.get("repository", {}).get("full_name", "") == repo
         ]
     except (json.JSONDecodeError, KeyError, TypeError):
-        matching = []
+        matching_ids = []
 
-    for inv_id in matching:
-        subprocess.run(
-            ["curl", "-s", "-o", "/dev/null", "-X", "PATCH",
-             "-H", f"Authorization: token {bot_token}",
+    for inv_id in matching_ids:
+        accept = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "-X", "PATCH", "-H", f"Authorization: token {bot_token}",
              f"https://api.github.com/user/repository_invitations/{inv_id}"],
             capture_output=True,
             text=True,
         )
+        http_code = accept.stdout.strip()
+        if http_code not in ("204", ""):
+            return CheckResult(
+                "bot-collaborator",
+                CheckStatus.WARN,
+                f"invitation {inv_id} accept returned HTTP {http_code} for {repo}",
+            )
 
     return CheckResult(
         "bot-collaborator",
         CheckStatus.PASS,
-        f"added yeast-bot as collaborator on {repo} and accepted {len(matching)} invitation(s)",
+        f"added yeast-bot as collaborator on {repo} and accepted {len(matching_ids)} invitation(s)",
     )
 
 
@@ -194,13 +208,9 @@ def run_health_checks(repo: str) -> HealthReport:
         )
 
     # 7. Not running inside Claude Code (nesting guard)
-    # 5. BREADFORGE_GH_TOKEN present (required for yeast-bot operations)
+    # 5. BREADFORGE_GH_TOKEN present and valid (required for yeast-bot operations)
     bot_token = os.environ.get("BREADFORGE_GH_TOKEN") or ""
-    if bot_token:
-        checks.append(
-            CheckResult("bot-token", CheckStatus.PASS, "BREADFORGE_GH_TOKEN is set")
-        )
-    else:
+    if not bot_token:
         checks.append(
             CheckResult(
                 "bot-token",
@@ -210,6 +220,28 @@ def run_health_checks(repo: str) -> HealthReport:
                 "so build agents can authenticate to GitHub as the service account.",
             )
         )
+    else:
+        # Validate token actually works by calling the GitHub API as yeast-bot
+        token_check = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "-H", f"Authorization: token {bot_token}",
+             "https://api.github.com/user"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        http_code = token_check.stdout.strip()
+        if http_code == "200":
+            checks.append(CheckResult("bot-token", CheckStatus.PASS, "BREADFORGE_GH_TOKEN is set and valid"))
+        else:
+            checks.append(
+                CheckResult(
+                    "bot-token",
+                    CheckStatus.FAIL,
+                    f"BREADFORGE_GH_TOKEN is set but invalid (HTTP {http_code}) — "
+                    "regenerate yeast-bot's token and update BREADFORGE_GH_TOKEN.",
+                )
+            )
 
     # 6. yeast-bot is repo collaborator (auto-adds and accepts invitation if missing)
     if repo and bot_token:
