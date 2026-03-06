@@ -39,7 +39,7 @@ import typer  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-from breadforge.beads import BeadStore  # noqa: E402
+from breadforge.beads import BeadStore, GraphNode  # noqa: E402
 from breadforge.config import Config, Registry, RepoEntry  # noqa: E402
 from breadforge.health import run_health_checks  # noqa: E402
 from breadforge.logger import Logger  # noqa: E402
@@ -923,6 +923,43 @@ def init(
         raise typer.Exit(1)
 
 
+def _format_validate_state(node: GraphNode) -> str:
+    """Format the state column for a validate node.
+
+    Maps internal node state + output metadata to the canonical display format:
+    - pending   → not yet started
+    - running   → currently executing
+    - passed    → done with no failures
+    - failed(N) → done with N failing assertions
+    """
+    if node.state == "pending":
+        return "pending"
+    if node.state == "running":
+        return "running"
+    if node.state in ("done", "failed"):
+        output = node.output or {}
+        failed_count = output.get("failed_count")
+        if failed_count is not None:
+            n = int(failed_count)
+            if n == 0:
+                return "passed"
+            return f"failed({n})"
+        # Derive from assertions list if failed_count not stored directly
+        assertions = node.context.get("assertions", [])
+        passed = output.get("passed", [])
+        if assertions and passed:
+            n = len(assertions) - len(passed)
+            if n <= 0:
+                return "passed"
+            return f"failed({n})"
+        # Fall back based on node state
+        if node.state == "done":
+            return "passed"
+        return "failed(0)"
+    # abandoned / wont-do etc — show raw state
+    return node.state
+
+
 def _build_status_table(
     store: BeadStore,
     repo: str,
@@ -992,18 +1029,22 @@ def _build_status_table(
         node_table.add_column("State")
         node_table.add_column("Model")
         node_table.add_column("Retries", justify="right")
-        _TYPE_ORDER = {"plan": 0, "research": 1, "build": 2, "merge": 3, "readme": 4}
-        for node in sorted(nodes, key=lambda n: (_TYPE_ORDER.get(n.type, 5), n.id)):
+        _TYPE_ORDER = {"plan": 0, "research": 1, "build": 2, "merge": 3, "readme": 4, "validate": 5}
+        for node in sorted(nodes, key=lambda n: (_TYPE_ORDER.get(n.type, 6), n.id)):
             color = node_colors.get(node.state, "white")
             if node.type == "merge":
                 node_model_display = "[dim]N/A[/dim]"
             else:
                 node_model = (node.output or {}).get("model") or node.assigned_model or ""
                 node_model_display = _model_tier(node_model)
+            if node.type == "validate":
+                state_display = f"[{color}]{_format_validate_state(node)}[/{color}]"
+            else:
+                state_display = f"[{color}]{node.state}[/{color}]"
             node_table.add_row(
                 node.id,
                 node.type,
-                f"[{color}]{node.state}[/{color}]",
+                state_display,
                 node_model_display,
                 str(node.retry_count) if node.retry_count else "",
             )
