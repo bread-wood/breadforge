@@ -285,6 +285,8 @@ def _file_module_issue(
             body,
             "--label",
             "stage/impl",
+            "--milestone",
+            milestone_slug,
         ],
         capture_output=True,
         text=True,
