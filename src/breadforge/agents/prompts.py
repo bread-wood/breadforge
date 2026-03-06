@@ -63,8 +63,16 @@ Steps:
    - Cover edge cases, error paths, and boundary conditions
    - Do not write trivial smoke tests that only check a function runs without error
    - Aim for full branch coverage of the logic you implement
-6. Run tests — all must pass.
-7. Run lint — must be clean.
+6. Run the FULL test suite — not just your new tests:
+   ```
+   uv run pytest
+   ```
+   All tests must pass. If existing tests fail:
+   - Check if they were already failing before your changes: `git stash && uv run pytest && git stash pop`
+   - If pre-existing: note it in the PR description and file a follow-up issue, but do NOT leave your own
+     changes in a state that makes it worse
+   - If your changes caused the regression: fix it before pushing
+7. Run lint — must be clean: `uv run ruff check`
 8. Commit referencing the issue: `git commit -m "feat: <description> (closes #{issue_number})"`
 9. `git push`
 10. Create PR: `gh pr create --repo {repo} --title "<title>" --body "Closes #{issue_number}"`
