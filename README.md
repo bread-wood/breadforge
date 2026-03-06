@@ -20,11 +20,17 @@ breadforge repo add bread-wood/myproject --local-path ~/dev/myproject
 # Run a spec
 breadforge run specs/v1.0.0-feature.md --repo bread-wood/myproject
 
+# Run with a cost cap
+breadforge run specs/v1.0.0-feature.md --repo bread-wood/myproject --max-budget 5.00
+
 # Run a full campaign
 breadforge run specs/campaign.md --repo bread-wood/myproject
 
 # Check status
 breadforge status --repo bread-wood/myproject
+
+# Show cost summary
+breadforge cost
 
 # Design a new spec interactively
 breadforge spec "add order history with export to CSV"
@@ -35,6 +41,7 @@ breadforge spec "add order history with export to CSV"
 | Command | Description |
 |---------|-------------|
 | `breadforge run <spec.md>` | Parse spec, file issues, dispatch agents |
+| `breadforge run <spec.md> --max-budget <usd>` | Stop and report when cumulative spend exceeds cap |
 | `breadforge plan <spec.md>` | Seed issues without dispatching |
 | `breadforge run-issue --issue N` | Dispatch a single issue (used by GHA) |
 | `breadforge init --milestone v1.0.0` | Create a GitHub milestone |
@@ -57,6 +64,7 @@ breadforge run spec.md
        ▼
   GraphExecutor (async DAG)
   ┌────────────────────────────────────────┐
+  │  OrchestratorLock (fcntl per repo)    │
   │  plan node → expands build nodes      │
   │  research node → Gemini / GPT-4.1     │
   │  build node → Claude agent            │
@@ -65,10 +73,14 @@ breadforge run spec.md
   │  design_doc node → LLM design output  │
   │                                        │
   │  concurrency=3  watchdog=60s           │
+  │  budget cap checked between dispatches │
   └────────────────────────────────────────┘
        │
        ▼
   MergeQueue → squash merge → close WorkBead
+       │
+       ▼
+  CostLedger → ~/.breadforge/runs/{run_id}.jsonl
 ```
 
 ### DAG Executor
@@ -78,6 +90,8 @@ The `GraphExecutor` drives an async event loop over an `ExecutionGraph` DAG. Key
 - **Dynamic expansion**: `plan` nodes emit new build/merge/readme nodes at runtime; the executor wires overlap edges between build nodes touching the same files.
 - **Crash recovery**: nodes found in `running` state on restart are handed to the handler's `recover()` method before re-dispatching.
 - **Dry-run mode**: skips build/merge dispatch; creates `WorkBead`s so the plan can be reviewed before agents run.
+- **Budget cap**: when `--max-budget` is set, the executor accumulates spend from completed nodes and refuses to dispatch new nodes once the cap is exceeded, marking remaining pending nodes abandoned.
+- **Orchestrator lock**: an exclusive `fcntl.flock` on `~/.breadforge/locks/{owner}-{repo}.lock` is held for the duration of `GraphExecutor.run()`. A second concurrent invocation against the same repo prints an error and exits 1.
 - **BackendRouter**: routes node types to LLM backends — `research`/`plan` nodes to `research_model` (Gemini or GPT-4.1), `build`/`merge`/`readme` nodes to `build_model` (Claude), `wait`/`consensus`/`design_doc` to `design_model`.
 
 ### Node Types
@@ -102,6 +116,18 @@ Beads are the canonical source of truth. All state lives in `~/.breadforge/beads
 - `MergeQueue` — sequential squash merge ordering
 - `CampaignBead` — multi-milestone campaign progress; carries `blocked_by` for cross-repo deps
 - `AnomalyBead` — monitor anomalies and repair state
+
+### Cost Tracking
+
+Every completed `run_agent` call appends a record to `~/.breadforge/runs/{run_id}.jsonl`:
+
+```json
+{"run_id": "...", "node_id": "...", "model": "...", "input_tokens": 1234, "output_tokens": 456, "cost_usd": 0.0123, "timestamp": "2026-03-05T..."}
+```
+
+`breadforge cost` reads these files and prints per-run and aggregate spend. Token counts and cost are extracted from the `usage` field of the stream-json `result` event emitted by `claude --output-format stream-json --print`.
+
+Errors are classified from the same event into four types: `rate_limit`, `billing_error`, `auth_failure`, `error_max_turns`. On `rate_limit` or `overload`, the agent is retried once with `claude-haiku-4-5-20251001` before the retry budget is decremented.
 
 ### Multi-Backend Support
 
@@ -195,17 +221,19 @@ for zombie PRs and stuck issues.
 
 | Module | Description |
 |--------|-------------|
-| `breadforge.cli` | Typer CLI; entry point for all commands including `run-issue` |
+| `breadforge.cli` | Typer CLI; entry point for all commands including `run-issue` and `cost` |
 | `breadforge.config` | Runtime `Config` dataclass and platform repo `Registry` |
 | `breadforge.spec` | Spec and campaign file parsing |
-| `breadforge.graph.executor` | `ExecutionGraph` and async `GraphExecutor` DAG engine |
+| `breadforge.graph.executor` | `ExecutionGraph` and async `GraphExecutor` DAG engine; budget cap enforcement |
 | `breadforge.graph.builder` | Graph construction helpers and cross-repo blocking wiring |
+| `breadforge.graph.lock` | `OrchestratorLock` — per-repo exclusive file lock via `fcntl.flock` |
 | `breadforge.graph.node` | `GraphNode`, `NodeHandler` protocol, `BackendRouter`, `CredentialProxy` facade |
 | `breadforge.graph.handlers` | One handler per node type: build, merge, plan, research, readme, wait, consensus, design_doc |
 | `breadforge.backends` | Pluggable LLM backends: `AnthropicBackend`, `GeminiBackend`, `OpenAIBackend` |
 | `breadforge.proxy` | Loopback credential proxy server and HMAC token issuance/validation |
 | `breadforge.beads` | `BeadStore` and bead types (`WorkBead`, `PRBead`, `CampaignBead`, …) |
-| `breadforge.agents` | Agent runner and prompt templates |
+| `breadforge.agents.runner` | `run_agent` subprocess runner; `RunResult` with token counts, cost, and error classification |
+| `breadforge.agents.ledger` | `CostLedger` — append-only JSONL writer at `~/.breadforge/runs/` |
 | `breadforge.monitor` | Anomaly detection, repair loop, and watchdog |
 | `breadforge.forge` | Interactive spec-forge (interview, draft, validate) |
 | `breadforge.health` | Preflight health checks |
