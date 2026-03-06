@@ -15,6 +15,10 @@ Cross-repo blocking:
 Consensus/design-doc helpers:
   emit_consensus_node          — emit a consensus node that votes over proposals
   emit_design_doc_node         — emit a design_doc node for a given task
+
+Validate/bug helpers:
+  emit_validate_node           — emit a validate node that runs spec assertions
+  emit_bug_node                — emit a bug node for a failed validation assertion
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ def build_greenfield_graph(
     repo_local_path: str | None = None,
     milestone_issue_number: int | None = None,
 ) -> ExecutionGraph:
-    """Initial graph for a new project: single plan node."""
+    """Initial graph for a new project: plan node → ... → readme → validate."""
     plan_node = GraphNode(
         id=f"{milestone}-plan",
         type="plan",
@@ -51,7 +55,13 @@ def build_greenfield_graph(
             "milestone_issue_number": milestone_issue_number,
         },
     )
-    return ExecutionGraph([plan_node])
+    readme_node_id = f"{milestone}-readme"
+    validate_node = emit_validate_node(
+        milestone=milestone,
+        depends_on=[readme_node_id],
+        spec_file=str(spec_file),
+    )
+    return ExecutionGraph([plan_node, validate_node])
 
 
 def build_feature_graph(
@@ -60,7 +70,7 @@ def build_feature_graph(
     repo: str,
     repo_local_path: str | None = None,
 ) -> ExecutionGraph:
-    """Initial graph for a feature on an existing codebase: single plan node."""
+    """Initial graph for a feature on an existing codebase: plan node → ... → readme → validate."""
     plan_node = GraphNode(
         id=f"{milestone}-plan",
         type="plan",
@@ -72,7 +82,13 @@ def build_feature_graph(
             "research_node_ids": [],
         },
     )
-    return ExecutionGraph([plan_node])
+    readme_node_id = f"{milestone}-readme"
+    validate_node = emit_validate_node(
+        milestone=milestone,
+        depends_on=[readme_node_id],
+        spec_file=str(spec_file),
+    )
+    return ExecutionGraph([plan_node, validate_node])
 
 
 def build_bug_graph(
@@ -374,4 +390,105 @@ def emit_design_doc_node(
         depends_on=depends_on or [],
         context=context,
         max_retries=2,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Validate and bug node emitters
+# ---------------------------------------------------------------------------
+
+
+def emit_validate_node(
+    milestone: str,
+    depends_on: list[str] | None = None,
+    assertions: list[str] | None = None,
+    spec_markdown: str = "",
+    spec_file: str = "",
+    tracking_issue_number: int | None = None,
+) -> GraphNode:
+    """Create a validate node that runs spec assertions after build completes.
+
+    The validate handler accepts assertions via three sources (in priority order):
+    1. ``assertions`` — pre-parsed list of shell commands
+    2. ``spec_markdown`` — raw spec text to parse at execution time
+    3. ``spec_file`` — path stored in context for the handler to read
+
+    Args:
+        milestone: Milestone slug used to generate the node id.
+        depends_on: Node ids this validate node waits on (typically the readme node).
+        assertions: Pre-parsed assertion shell commands.
+        spec_markdown: Raw spec text from which assertions are extracted.
+        spec_file: Path to the spec file (stored in context for reference).
+        tracking_issue_number: GitHub issue number to close when all assertions pass.
+    """
+    context: dict = {
+        "milestone": milestone,
+        "fix_cycles": {},
+    }
+    if assertions:
+        context["assertions"] = assertions
+    if spec_markdown:
+        context["spec_markdown"] = spec_markdown
+    if spec_file:
+        context["spec_file"] = spec_file
+    if tracking_issue_number is not None:
+        context["tracking_issue_number"] = tracking_issue_number
+    return make_node(
+        id=f"{milestone}-validate",
+        type="validate",
+        depends_on=depends_on or [],
+        context=context,
+        max_retries=3,
+    )
+
+
+def emit_bug_node(
+    milestone: str,
+    command: str,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    depends_on: list[str] | None = None,
+    module: str = "",
+    files: list[str] | None = None,
+    issue_title: str = "",
+) -> GraphNode:
+    """Create a bug node for a failed validation assertion.
+
+    The bug handler reads context keys ``command``, ``stdout``, ``stderr``,
+    ``exit_code``, ``milestone``, ``module``, and ``files`` to file a GitHub
+    issue and emit a remedial build node.
+
+    Args:
+        milestone: Milestone slug; used for the node id and GitHub milestone label.
+        command: The shell command that failed (e.g. ``"uv run pytest"``).
+        exit_code: Exit code returned by the failing command.
+        stdout: Captured stdout (truncated to 2000 chars in the node context).
+        stderr: Captured stderr (truncated to 2000 chars in the node context).
+        depends_on: Node ids this bug node waits on.
+        module: Module label for the filed GitHub issue and build node scope.
+        files: File scope forwarded to the remedial build node context.
+        issue_title: Override for the filed issue title; defaults to a generated title.
+    """
+    import re
+
+    slug = re.sub(r"[^a-zA-Z0-9]", "-", command)[:30].strip("-").lower()
+    context: dict = {
+        "command": command,
+        "exit_code": exit_code,
+        # Truncate to avoid bloating the bead store with huge outputs.
+        "stdout": stdout[:2000],
+        "stderr": stderr[:2000],
+        "milestone": milestone,
+        "module": module,
+        "files": files or [],
+    }
+    if issue_title:
+        context["issue_title"] = issue_title
+    return make_node(
+        id=f"{milestone}-bug-{slug}",
+        type="bug",
+        depends_on=depends_on or [],
+        context=context,
+        max_retries=3,
     )

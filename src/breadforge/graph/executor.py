@@ -128,7 +128,7 @@ class GraphExecutor:
     # Node types that represent work dispatch — skipped in dry-run mode.
     # Plan and research nodes always run (they produce the plan and beads).
     _DRY_RUN_SKIP_TYPES: frozenset[str] = frozenset(
-        {"build", "merge", "readme", "design_doc", "wait"}
+        {"build", "merge", "readme", "design_doc", "wait", "validate", "bug"}
     )
 
     def __init__(
@@ -463,12 +463,14 @@ def make_handlers(
     logger: Logger | None = None,
 ) -> dict[NodeType, NodeHandler]:
     """Instantiate all handlers. Import lazily to avoid circular deps."""
+    from breadforge.graph.handlers.bug import BugHandler
     from breadforge.graph.handlers.build import BuildHandler
     from breadforge.graph.handlers.consensus import ConsensusHandler, DesignDocHandler, WaitHandler
     from breadforge.graph.handlers.merge import MergeHandler
     from breadforge.graph.handlers.plan import PlanHandler
     from breadforge.graph.handlers.readme import ReadmeHandler
     from breadforge.graph.handlers.research import ResearchHandler
+    from breadforge.graph.handlers.validate import ValidateHandler
 
     return {
         "plan": PlanHandler(store=store, logger=logger),
@@ -480,4 +482,7 @@ def make_handlers(
         "wait": WaitHandler(store=store, logger=logger),
         "consensus": ConsensusHandler(store=store, logger=logger),
         "design_doc": DesignDocHandler(store=store, logger=logger),
+        # validate module
+        "validate": ValidateHandler(store=store, logger=logger),
+        "bug": BugHandler(store=store, logger=logger),
     }
