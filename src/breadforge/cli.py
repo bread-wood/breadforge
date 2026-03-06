@@ -987,7 +987,8 @@ def _build_status_table(
         node_table.add_column("State")
         node_table.add_column("Model")
         node_table.add_column("Retries", justify="right")
-        for node in sorted(nodes, key=lambda n: n.id):
+        _TYPE_ORDER = {"plan": 0, "research": 1, "build": 2, "merge": 3, "readme": 4}
+        for node in sorted(nodes, key=lambda n: (_TYPE_ORDER.get(n.type, 5), n.id)):
             color = node_colors.get(node.state, "white")
             if node.type == "merge":
                 node_model_display = "[dim]N/A[/dim]"
@@ -1531,7 +1532,8 @@ def graph_nodes(
     table.add_column("Retries", justify="right")
     table.add_column("Cost (USD)", justify="right")
 
-    for node in sorted(nodes, key=lambda n: n.id):
+    _TYPE_ORDER = {"plan": 0, "research": 1, "build": 2, "merge": 3, "readme": 4}
+    for node in sorted(nodes, key=lambda n: (_TYPE_ORDER.get(n.type, 5), n.id)):
         color = _NODE_STATE_COLORS.get(node.state, "white")
         node_model = (node.output or {}).get("model") or node.assigned_model or ""
         cost = (node.output or {}).get("cost_usd")
