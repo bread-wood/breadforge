@@ -980,6 +980,7 @@ def _build_status_table(
             "done": "green",
             "failed": "red",
             "abandoned": "red",
+            "wont-do": "dim",
         }
         node_table = Table(title="Graph Nodes")
         node_table.add_column("Node ID")
@@ -1497,6 +1498,7 @@ _NODE_STATE_COLORS = {
     "done": "green",
     "failed": "red",
     "abandoned": "red",
+    "wont-do": "dim",
 }
 
 

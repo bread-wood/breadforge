@@ -170,12 +170,19 @@ class GraphExecutor:
                 continue
             seen.add(node.id)
             existing = self._store.read_node(node.id)
-            if not existing or existing.state != "done":
-                # Reset abandoned→pending in the store so status displays correctly
-                if existing and existing.state == "abandoned":
-                    self._store.write_node(node)
+            if not existing or existing.state not in ("done", "abandoned", "wont-do"):
                 continue
-            node.state = "done"  # type: ignore[assignment]
+            node.state = existing.state  # type: ignore[assignment]
+            if existing.state == "wont-do":
+                # Intentionally skipped — never re-dispatch, even on re-run
+                result.abandoned.append(node.id)
+                continue
+            if existing.state == "abandoned":
+                # Failed — reset to pending so re-run gets a fresh attempt
+                node.state = "pending"  # type: ignore[assignment]
+                self._store.write_node(node)
+                continue
+            # state == "done"
             node.output = existing.output
             result.done.append(node.id)
             # Replay plan node expansion so dependents are in the graph
