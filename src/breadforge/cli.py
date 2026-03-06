@@ -608,6 +608,13 @@ def run(
     model: Annotated[str | None, typer.Option(help="Override model for all agents.")] = None,
     milestone: Annotated[str | None, typer.Option(help="GitHub milestone name.")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    tracking_issue: Annotated[
+        bool,
+        typer.Option(
+            "--tracking-issue/--no-tracking-issue",
+            help="File a milestone tracking issue on GitHub (closed when milestone completes).",
+        ),
+    ] = True,
 ) -> None:
     """Parse spec(s), file GitHub issues, and dispatch agents."""
     import os as _os
@@ -658,7 +665,7 @@ def run(
             for sub_path in sub_specs:
                 if sub_path.exists():
                     issue_numbers = _run_single_spec(
-                        sub_path, repo, config, store, logger, milestone, dry_run
+                        sub_path, repo, config, store, logger, milestone, dry_run, tracking_issue
                     )
                     all_issue_numbers.extend(issue_numbers)
                     if issue_numbers:
@@ -667,7 +674,7 @@ def run(
                         _spec_paths.append((sub_path, ms, milestone_issue))
         else:
             issue_numbers = _run_single_spec(
-                spec_path, repo, config, store, logger, milestone, dry_run
+                spec_path, repo, config, store, logger, milestone, dry_run, tracking_issue
             )
             all_issue_numbers.extend(issue_numbers)
             if issue_numbers:
@@ -785,6 +792,7 @@ def _run_single_spec(
     logger: Logger,
     milestone_override: str | None,
     dry_run: bool,
+    tracking_issue: bool = True,
 ) -> list[int]:
     spec = parse_spec(spec_path)
     ms = milestone_override or f"{spec.version}"
@@ -815,30 +823,36 @@ def _run_single_spec(
             body += f"- [ ] {c}\n"
     body += f"\n_Spec: `{spec_path.name}`_"
 
-    # File one impl issue (agents reason about decomposition themselves)
-    existing = _get_open_issues_for_milestone(repo, ms) if not dry_run else []
-    impl_issues = [i for i in existing if "stage/impl" in str(i.get("labels", []))]
-
     issue_numbers: list[int] = []
 
-    if not impl_issues:
-        if dry_run:
-            console.print(f"  [dry-run] would file impl issue: {spec.issue_title}")
-            return [-1]  # sentinel
+    if tracking_issue:
+        # File one stub issue as the milestone tracking ticket.
+        existing = _get_open_issues_for_milestone(repo, ms) if not dry_run else []
+        impl_issues = [i for i in existing if "stage/impl" in str(i.get("labels", []))]
 
-        issue_number = _file_issue(
-            repo,
-            title=spec.issue_title,
-            body=body,
-            milestone=ms,
-            labels=["stage/impl", "P2"],
-        )
-        if issue_number:
-            console.print(f"  filed issue #{issue_number}: {spec.issue_title}")
-            issue_numbers.append(issue_number)
+        if not impl_issues:
+            if dry_run:
+                console.print(f"  [dry-run] would file tracking issue: {spec.issue_title}")
+                return [-1]  # sentinel
+
+            issue_number = _file_issue(
+                repo,
+                title=spec.issue_title,
+                body=body,
+                milestone=ms,
+                labels=["stage/impl", "P2"],
+            )
+            if issue_number:
+                console.print(f"  filed tracking issue #{issue_number}: {spec.issue_title}")
+                issue_numbers.append(issue_number)
+        else:
+            issue_numbers = [i["number"] for i in impl_issues]
+            console.print(f"  using existing tracking issues: {issue_numbers}")
     else:
-        issue_numbers = [i["number"] for i in impl_issues]
-        console.print(f"  using existing issues: {issue_numbers}")
+        if dry_run:
+            console.print("  [dry-run] skipping tracking issue (--no-tracking-issue)")
+            return [-1]  # sentinel
+        console.print("  [dim]tracking issue skipped (--no-tracking-issue)[/dim]")
 
     # Seed WorkBeads
     issues_data = [{"number": n, "title": spec.issue_title} for n in issue_numbers]
@@ -847,7 +861,7 @@ def _run_single_spec(
         console.print(f"  seeded {len(new_beads)} work bead(s)")
 
     logger.info(f"spec {spec_path.name} → {len(issue_numbers)} issue(s)", milestone=ms)
-    return issue_numbers
+    return issue_numbers if issue_numbers else [-1]  # return sentinel so caller adds to _spec_paths
 
 
 @app.command()
@@ -1920,17 +1934,19 @@ def _launch_dashboard_tui() -> None:
         def on_mount(self) -> None:
             # On first load expand all repo nodes by default
             rows = _collect_dashboard_rows()
-            default_expanded = {f"[cyan bold]{repo}[/cyan bold]" for repo, _, _ in rows}
+            default_expanded = {repo for repo, _, _ in rows}
             self._populate(restore_expanded=default_expanded)
 
         def _expanded_keys(self) -> set[str]:
-            """Walk the current tree and collect labels of expanded non-leaf nodes."""
+            """Collect plain-text keys of expanded non-leaf nodes."""
             tree: Tree = self.query_one("#tree", Tree)
             expanded: set[str] = set()
 
             def _walk(node: TreeNode) -> None:
-                if node.allow_expand and node._expanded:  # noqa: SLF001
-                    expanded.add(str(node.label))
+                if node.allow_expand and node._expanded and isinstance(node.data, dict):  # noqa: SLF001
+                    key = node.data.get("key")
+                    if key:
+                        expanded.add(key)
                 for child in node.children:
                     _walk(child)
 
@@ -1954,16 +1970,24 @@ def _launch_dashboard_tui() -> None:
 
             for repo, ms, nodes in rows:
                 if repo != last_repo:
-                    repo_label = f"[cyan bold]{repo}[/cyan bold]"
-                    repo_node = tree.root.add(repo_label, expand=repo_label in restore_expanded)
+                    repo_node = tree.root.add(
+                        f"[cyan bold]{repo}[/cyan bold]",
+                        expand=repo in restore_expanded,
+                        data={"key": repo},
+                    )
                     last_repo = repo
 
                 done, total, bar_markup, status, color = _milestone_summary(nodes)
+                ms_key = f"{repo}/{ms}"
                 ms_label = (
                     f"{bar_markup}  [bold]{ms}[/bold]  "
                     f"[dim]{done}/{total}[/dim]  [{color}]{status}[/{color}]"
                 )
-                ms_node = repo_node.add(ms_label, expand=ms_label in restore_expanded)
+                ms_node = repo_node.add(
+                    ms_label,
+                    expand=ms_key in restore_expanded,
+                    data={"key": ms_key},
+                )
 
                 _ORDER = {
                     "plan": 0,
