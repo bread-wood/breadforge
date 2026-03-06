@@ -1918,10 +1918,29 @@ def _launch_dashboard_tui() -> None:
             yield Footer()
 
         def on_mount(self) -> None:
-            self._populate()
+            # On first load expand all repo nodes by default
+            rows = _collect_dashboard_rows()
+            default_expanded = {f"[cyan bold]{repo}[/cyan bold]" for repo, _, _ in rows}
+            self._populate(restore_expanded=default_expanded)
 
-        def _populate(self) -> None:
+        def _expanded_keys(self) -> set[str]:
+            """Walk the current tree and collect labels of expanded non-leaf nodes."""
             tree: Tree = self.query_one("#tree", Tree)
+            expanded: set[str] = set()
+
+            def _walk(node: TreeNode) -> None:
+                if node.allow_expand and node._expanded:  # noqa: SLF001
+                    expanded.add(str(node.label))
+                for child in node.children:
+                    _walk(child)
+
+            _walk(tree.root)
+            return expanded
+
+        def _populate(self, restore_expanded: set[str] | None = None) -> None:
+            tree: Tree = self.query_one("#tree", Tree)
+            if restore_expanded is None:
+                restore_expanded = self._expanded_keys()
             tree.clear()
             tree.root.expand()
 
@@ -1935,7 +1954,8 @@ def _launch_dashboard_tui() -> None:
 
             for repo, ms, nodes in rows:
                 if repo != last_repo:
-                    repo_node = tree.root.add(f"[cyan bold]{repo}[/cyan bold]", expand=True)
+                    repo_label = f"[cyan bold]{repo}[/cyan bold]"
+                    repo_node = tree.root.add(repo_label, expand=repo_label in restore_expanded)
                     last_repo = repo
 
                 done, total, bar_markup, status, color = _milestone_summary(nodes)
@@ -1943,7 +1963,7 @@ def _launch_dashboard_tui() -> None:
                     f"{bar_markup}  [bold]{ms}[/bold]  "
                     f"[dim]{done}/{total}[/dim]  [{color}]{status}[/{color}]"
                 )
-                ms_node = repo_node.add(ms_label, expand=False)
+                ms_node = repo_node.add(ms_label, expand=ms_label in restore_expanded)
 
                 _ORDER = {
                     "plan": 0,
@@ -1974,7 +1994,7 @@ def _launch_dashboard_tui() -> None:
         def action_toggle_node(self) -> None:
             tree: Tree = self.query_one("#tree", Tree)
             node = tree.cursor_node
-            if node is not None and not node.is_leaf:
+            if node is not None and node.allow_expand:
                 node.toggle()
 
         def action_diagnose(self) -> None:
