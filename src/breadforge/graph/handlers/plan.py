@@ -148,7 +148,7 @@ async def _call_plan_llm(
         from breadforge.backends import get_backend
 
         backend = get_backend(plan_backend, model=plan_model_override)
-        response = await backend.complete(prompt, max_tokens=1500)
+        response = await backend.complete(prompt, max_tokens=4096)
         text = response.content
     else:
         try:
@@ -159,7 +159,7 @@ async def _call_plan_llm(
             call = LLMCall(
                 model=effective_model,
                 messages=[LLMMessage(role=MessageRole.USER, content=prompt)],
-                max_tokens=1500,
+                max_tokens=4096,
                 caller="breadforge.plan",
             )
             llm_response = await registry.complete(call)
@@ -170,7 +170,7 @@ async def _call_plan_llm(
             client = anthropic.AsyncAnthropic()
             sdk_response = await client.messages.create(
                 model=effective_model,
-                max_tokens=1500,
+                max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = sdk_response.content[0].text  # type: ignore[union-attr]
