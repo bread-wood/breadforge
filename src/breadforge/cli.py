@@ -31,6 +31,9 @@ console = Console()
 repo_app = typer.Typer(help="Manage platform repo registry.")
 app.add_typer(repo_app, name="repo")
 
+graph_app = typer.Typer(help="Inspect and manage graph execution nodes.")
+app.add_typer(graph_app, name="graph")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -100,15 +103,21 @@ def _accept_bot_invitation(repo: str, token: str) -> None:
     import base64 as _base64  # noqa: F401 — kept for future use; suppress unused warning
 
     list_r = subprocess.run(
-        ["curl", "-s", "-H", f"Authorization: token {token}",
-         "https://api.github.com/user/repository_invitations"],
+        [
+            "curl",
+            "-s",
+            "-H",
+            f"Authorization: token {token}",
+            "https://api.github.com/user/repository_invitations",
+        ],
         capture_output=True,
         text=True,
     )
     try:
         invitations = json.loads(list_r.stdout)
         matching = [
-            inv["id"] for inv in invitations
+            inv["id"]
+            for inv in invitations
             if inv.get("repository", {}).get("full_name", "") == repo
         ]
     except (json.JSONDecodeError, KeyError, TypeError):
@@ -116,9 +125,19 @@ def _accept_bot_invitation(repo: str, token: str) -> None:
 
     for inv_id in matching:
         subprocess.run(
-            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "PATCH",
-             "-H", f"Authorization: token {token}",
-             f"https://api.github.com/user/repository_invitations/{inv_id}"],
+            [
+                "curl",
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-X",
+                "PATCH",
+                "-H",
+                f"Authorization: token {token}",
+                f"https://api.github.com/user/repository_invitations/{inv_id}",
+            ],
             capture_output=True,
             text=True,
         )
@@ -135,8 +154,15 @@ def _add_bot_collaborator(repo: str) -> None:
 
     env = {k: v for k, v in _os.environ.items() if k != "GH_TOKEN"}
     result = subprocess.run(
-        ["gh", "api", f"repos/{repo}/collaborators/{_BREADFORGE_BOT}",
-         "-X", "PUT", "-f", "permission=push"],
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/collaborators/{_BREADFORGE_BOT}",
+            "-X",
+            "PUT",
+            "-f",
+            "permission=push",
+        ],
         capture_output=True,
         text=True,
         env=env,
@@ -178,10 +204,17 @@ def _install_ci_workflow(repo: str, branch: str = "mainline") -> None:
     content = _CI_WORKFLOW_TEMPLATE.format(branch=branch)
     encoded = base64.b64encode(content.encode()).decode()
     subprocess.run(
-        ["gh", "api", f"repos/{repo}/contents/.github/workflows/ci.yml",
-         "-X", "PUT",
-         "-f", "message=ci: install breadforge CI workflow",
-         "-f", f"content={encoded}"],
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/contents/.github/workflows/ci.yml",
+            "-X",
+            "PUT",
+            "-f",
+            "message=ci: install breadforge CI workflow",
+            "-f",
+            f"content={encoded}",
+        ],
         capture_output=True,
         text=True,
     )
@@ -1448,6 +1481,143 @@ def gha_dispatch(
     )
     if result.failed or result.abandoned:
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Graph subcommands
+# ---------------------------------------------------------------------------
+
+_NODE_STATE_COLORS = {
+    "pending": "dim",
+    "running": "yellow",
+    "done": "green",
+    "failed": "red",
+    "abandoned": "red",
+}
+
+
+@graph_app.command("nodes")
+def graph_nodes(
+    repo: Annotated[str | None, typer.Option(help="owner/repo to operate on.")] = None,
+    milestone: Annotated[str | None, typer.Option(help="Filter by milestone prefix.")] = None,
+    state: Annotated[
+        str | None, typer.Option(help="Filter by state: pending|running|done|failed|abandoned.")
+    ] = None,
+) -> None:
+    """List graph execution nodes for a repo."""
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    store = _get_store(config)
+
+    all_nodes = store.list_nodes()
+    nodes = all_nodes
+    if milestone:
+        nodes = [n for n in nodes if n.id.startswith(f"{milestone}-")]
+    if state:
+        nodes = [n for n in nodes if n.state == state]
+
+    if not nodes:
+        console.print("No graph nodes found.")
+        return
+
+    table = Table(title=f"Graph Nodes — {repo}" + (f" / {milestone}" if milestone else ""))
+    table.add_column("Node ID")
+    table.add_column("Type")
+    table.add_column("State")
+    table.add_column("Model")
+    table.add_column("Retries", justify="right")
+    table.add_column("Cost (USD)", justify="right")
+
+    for node in sorted(nodes, key=lambda n: n.id):
+        color = _NODE_STATE_COLORS.get(node.state, "white")
+        node_model = (node.output or {}).get("model") or node.assigned_model or ""
+        cost = (node.output or {}).get("cost_usd")
+        cost_str = f"${cost:.4f}" if cost is not None else ""
+        table.add_row(
+            node.id,
+            node.type,
+            f"[{color}]{node.state}[/{color}]",
+            node_model,
+            str(node.retry_count) if node.retry_count else "0",
+            cost_str,
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]{len(nodes)} node(s)[/dim]")
+
+
+@graph_app.command("node")
+def graph_node(
+    node_id: Annotated[str, typer.Argument(help="Node ID to inspect.")],
+    repo: Annotated[str | None, typer.Option(help="owner/repo to operate on.")] = None,
+) -> None:
+    """Show full details of a single graph node."""
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    store = _get_store(config)
+
+    node = store.read_node(node_id)
+    if node is None:
+        console.print(f"[red]error:[/red] node '{node_id}' not found")
+        raise typer.Exit(1)
+
+    color = _NODE_STATE_COLORS.get(node.state, "white")
+    console.print(f"\n[bold]{node.id}[/bold]")
+    console.print(f"  type:       {node.type}")
+    console.print(f"  state:      [{color}]{node.state}[/{color}]")
+    console.print(f"  retries:    {node.retry_count} / {node.max_retries}")
+    if node.assigned_model:
+        console.print(f"  model:      {node.assigned_model}")
+    if node.depends_on:
+        console.print(f"  depends_on: {', '.join(node.depends_on)}")
+    if node.started_at:
+        console.print(f"  started:    {node.started_at.isoformat()}")
+    if node.completed_at:
+        console.print(f"  completed:  {node.completed_at.isoformat()}")
+    if node.context:
+        console.print("\n[bold]Context:[/bold]")
+        for k, v in node.context.items():
+            console.print(f"  {k}: {v}")
+    if node.output:
+        console.print("\n[bold]Output:[/bold]")
+        for k, v in node.output.items():
+            if k not in ("artifact",):  # skip large nested objects
+                console.print(f"  {k}: {v}")
+        if "artifact" in node.output:
+            console.print("  artifact: [dim](present — use --json to see full)[/dim]")
+
+
+@graph_app.command("retry")
+def graph_retry(
+    node_id: Annotated[str, typer.Argument(help="Node ID to retry.")],
+    repo: Annotated[str | None, typer.Option(help="owner/repo to operate on.")] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Reset even if node is not failed/abandoned.")
+    ] = False,
+) -> None:
+    """Reset a failed or abandoned node to pending so it can be re-executed."""
+    repo = _require_repo(repo)
+    config = Config.from_env(repo)
+    store = _get_store(config)
+
+    node = store.read_node(node_id)
+    if node is None:
+        console.print(f"[red]error:[/red] node '{node_id}' not found")
+        raise typer.Exit(1)
+
+    if node.state not in ("failed", "abandoned") and not force:
+        console.print(
+            f"[yellow]warning:[/yellow] node '{node_id}' is in state '{node.state}' "
+            "(not failed/abandoned). Use --force to reset anyway."
+        )
+        raise typer.Exit(1)
+
+    old_state = node.state
+    node.state = "pending"
+    node.started_at = None
+    node.completed_at = None
+    store.write_node(node)
+    console.print(f"[green]ok[/green] node '{node_id}': {old_state} → pending")
 
 
 if __name__ == "__main__":
