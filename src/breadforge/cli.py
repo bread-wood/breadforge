@@ -1606,7 +1606,7 @@ def reconcile(
                 if not dry_run and len(live) != before:
                     mq["items"] = live
                     mq_path.write_text(_json.dumps(mq, indent=2))
-                    fixed += len(live) - before
+                    fixed += before - len(live)
             except Exception:
                 pass
 
